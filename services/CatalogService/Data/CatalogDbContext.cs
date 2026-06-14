@@ -8,6 +8,7 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
 {
     public DbSet<Branch> Branches => Set<Branch>();
     public DbSet<Service> Services => Set<Service>();
+    public DbSet<BranchService> BranchServices => Set<BranchService>();
     public DbSet<CatalogTenant> Tenants => Set<CatalogTenant>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
@@ -46,6 +47,17 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
         service.Property(entity => entity.UpdatedAt).HasColumnName("updated_at");
         service.HasIndex(entity => new { entity.TenantId, entity.Status })
             .HasDatabaseName("idx_services_tenant_status");
+
+        var branchService = modelBuilder.Entity<BranchService>();
+        branchService.ToTable("branch_services", "catalog");
+        branchService.HasKey(entity => new { entity.BranchId, entity.ServiceId });
+        branchService.Property(entity => entity.TenantId).HasColumnName("tenant_id");
+        branchService.Property(entity => entity.BranchId).HasColumnName("branch_id");
+        branchService.Property(entity => entity.ServiceId).HasColumnName("service_id");
+        branchService.Property(entity => entity.Status).HasColumnName("status").HasMaxLength(30);
+        branchService.Property(entity => entity.CreatedAt).HasColumnName("created_at");
+        branchService.HasIndex(entity => new { entity.TenantId, entity.ServiceId })
+            .HasDatabaseName("idx_branch_services_tenant");
 
         var tenant = modelBuilder.Entity<CatalogTenant>();
         tenant.ToTable("tenants", "identity");

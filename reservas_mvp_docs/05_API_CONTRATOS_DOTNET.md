@@ -488,7 +488,17 @@ reservas o auditoria.
 
 ### POST /branches/{branchId}/services/{serviceId}
 
-Habilita un servicio en una sucursal.
+Habilita un servicio en una sucursal. Solo `tenant_admin`. Sin body: los IDs van
+en la URL. Si la relación ya existe pero está inactiva, la reactiva. Devuelve
+`201 Created` al crear y `200 OK` al reactivar.
+
+### DELETE /branches/{branchId}/services/{serviceId}
+
+Deshabilita un servicio en una sucursal. Solo `tenant_admin`. Baja lógica: la
+vinculación pasa a `inactive` y el servicio deja de aparecer en
+`GET /public/tenants/{tenantSlug}/branches/{branchId}/services`. El servicio y la
+sucursal no se modifican. Devuelve `204 No Content`. Si la relación no existe o
+pertenece a otro tenant, devuelve `404 BRANCH_NOT_FOUND`.
 
 ### POST /resources
 

@@ -1,6 +1,7 @@
-# Curls listos para Postman — solo endpoints IMPLEMENTADOS
+# Curls listos para Postman — endpoints IMPLEMENTADOS y PLANIFICADOS (HU-009)
 
-Solo incluye lo que ya responde en el entorno Docker actual.  
+Solo incluye lo que ya responde en el entorno Docker actual, más los endpoints de
+HU-009 marcados como `PLANIFICADO` que responden `404` hasta su implementación.  
 Datos seed de `005_seed_demo.sql`. Formato `--url` explícito para import directo en Postman.
 
 ---
@@ -78,9 +79,20 @@ curl --request POST --url "http://localhost:5202/services" --header "Authorizati
 
 ---
 
+### 7. Vincular servicio a sucursal `[Catalog]`
+> HU-009 — `PLANIFICADO`: responde 404 hasta implementación. Habilita el servicio seed en la sucursal
+> seed. Sin body: los IDs van en la URL. Un servicio puede vincularse a varias sucursales; una
+> sucursal puede tener varios servicios (relación muchos-a-muchos). Responde 201 sin body.
+
+```
+curl --request POST --url "http://localhost:5202/branches/44444444-4444-4444-4444-444444444444/services/55555555-5555-5555-5555-555555555555" --header "Authorization: Bearer PEGAR_TENANT_ADMIN_TOKEN"
+```
+
+---
+
 ## FASE 3 — Verificación del catálogo (admin)
 
-### 7. Listar sucursales `[Catalog]`
+### 8. Listar sucursales `[Catalog]`
 > Admin verifica que las sucursales del tenant quedaron bien creadas.
 
 ```
@@ -89,7 +101,7 @@ curl --request GET --url "http://localhost:5202/branches?status=active" --header
 
 ---
 
-### 8. Ver sucursal por ID `[Catalog]`
+### 9. Ver sucursal por ID `[Catalog]`
 > Admin ve el detalle completo de la sucursal seed.
 
 ```
@@ -98,7 +110,7 @@ curl --request GET --url "http://localhost:5202/branches/44444444-4444-4444-4444
 
 ---
 
-### 9. Listar servicios `[Catalog]`
+### 10. Listar servicios `[Catalog]`
 > Admin verifica que los servicios del tenant quedaron bien creados.
 
 ```
@@ -107,7 +119,7 @@ curl --request GET --url "http://localhost:5202/services?status=active" --header
 
 ---
 
-### 10. Ver servicio por ID `[Catalog]`
+### 11. Ver servicio por ID `[Catalog]`
 > Admin ve el detalle completo del servicio seed.
 
 ```
@@ -118,7 +130,7 @@ curl --request GET --url "http://localhost:5202/services/55555555-5555-5555-5555
 
 ## FASE 4 — Portal público (sin autenticación)
 
-### 11. Listar tenants públicos `[Identity]`
+### 12. Listar tenants públicos `[Identity]`
 > Cualquiera puede ver qué empresas están activas en la plataforma.
 
 ```
@@ -127,7 +139,7 @@ curl --request GET --url "http://localhost:5201/tenants/public"
 
 ---
 
-### 12. Ver sucursales públicas del tenant `[Catalog]`
+### 13. Ver sucursales públicas del tenant `[Catalog]`
 > Cualquiera puede ver las sucursales activas de un negocio por su slug.
 
 ```
@@ -136,8 +148,19 @@ curl --request GET --url "http://localhost:5202/public/tenants/peluqueria-demo/b
 
 ---
 
-### 13. Ver servicios públicos del tenant `[Catalog]`
-> Cualquiera puede ver el catálogo de servicios activos del negocio.
+### 14. Ver servicios de una sucursal — público `[Catalog]`
+> HU-009 — `PLANIFICADO`: responde 404 hasta implementación. Flujo service-first: el cliente
+> eligió una sucursal y ahora ve qué servicios ofrece esa ubicación específica. Solo devuelve
+> servicios con la vinculación activa.
+
+```
+curl --request GET --url "http://localhost:5202/public/tenants/peluqueria-demo/branches/44444444-4444-4444-4444-444444444444/services"
+```
+
+---
+
+### 15. Ver servicios públicos del tenant `[Catalog]`
+> Cualquiera puede ver el catálogo completo de servicios activos del negocio (sin filtrar por sucursal).
 
 ```
 curl --request GET --url "http://localhost:5202/public/tenants/peluqueria-demo/services"
@@ -147,7 +170,7 @@ curl --request GET --url "http://localhost:5202/public/tenants/peluqueria-demo/s
 
 ## FASE 5 — Registro y sesión del cliente
 
-### 14. Registrar cliente `[Identity]`
+### 16. Registrar cliente `[Identity]`
 > El cliente crea su cuenta global. Email único en toda la plataforma.
 
 ```
@@ -156,7 +179,7 @@ curl --request POST --url "http://localhost:5201/auth/register-client" --header 
 
 ---
 
-### 15. Login cliente `[Identity]`
+### 17. Login cliente `[Identity]`
 > El cliente recién registrado (o el seed) inicia sesión.
 
 ```
@@ -165,7 +188,7 @@ curl --request POST --url "http://localhost:5201/auth/login" --header "Content-T
 
 ---
 
-### 16. Ver mi perfil `[Identity]`
+### 18. Ver mi perfil `[Identity]`
 > El cliente verifica sus propios datos con el token obtenido.
 
 ```
@@ -174,7 +197,7 @@ curl --request GET --url "http://localhost:5201/auth/me" --header "Authorization
 
 ---
 
-### 17. Editar mi perfil `[Identity]`
+### 19. Editar mi perfil `[Identity]`
 > El cliente actualiza su nombre, apellido, email o teléfono.
 
 ```
@@ -183,7 +206,7 @@ curl --request PUT --url "http://localhost:5201/users/me" --header "Authorizatio
 
 ---
 
-### 18. Cambiar mi contraseña `[Identity]`
+### 20. Cambiar mi contraseña `[Identity]`
 > Invalida todos los JWT anteriores. Volver a hacer login después.
 
 ```
@@ -194,7 +217,7 @@ curl --request PATCH --url "http://localhost:5201/users/me/password" --header "A
 
 ## FASE 6 — Gestión de usuarios (admin)
 
-### 19. Listar usuarios `[Identity]`
+### 21. Listar usuarios `[Identity]`
 > super_admin ve todos; tenant_admin ve solo su tenant.
 
 ```
@@ -203,7 +226,7 @@ curl --request GET --url "http://localhost:5201/users?tenantId=11111111-1111-111
 
 ---
 
-### 20. Ver usuario por ID `[Identity]`
+### 22. Ver usuario por ID `[Identity]`
 > Admin ve el detalle completo del usuario seed tenant_admin.
 
 ```
@@ -212,7 +235,7 @@ curl --request GET --url "http://localhost:5201/users/22222222-2222-2222-2222-22
 
 ---
 
-### 21. Validar acceso a sucursal `[Identity]`
+### 23. Validar acceso a sucursal `[Identity]`
 > Verifica si el usuario del token tiene permiso admin sobre la sucursal seed.
 
 ```
@@ -221,7 +244,7 @@ curl --request GET --url "http://localhost:5201/auth/access/branches/44444444-44
 
 ---
 
-### 22. Editar usuario `[Identity]`
+### 24. Editar usuario `[Identity]`
 > Admin actualiza nombre, apellido, email y teléfono de otro usuario.
 
 ```
@@ -230,7 +253,7 @@ curl --request PUT --url "http://localhost:5201/users/22222222-2222-2222-2222-22
 
 ---
 
-### 23. Cambiar estado de usuario `[Identity]`
+### 25. Cambiar estado de usuario `[Identity]`
 > Activa, desactiva o bloquea. Los JWT del usuario quedan inválidos al desactivar/bloquear.
 
 ```
@@ -241,7 +264,7 @@ curl --request PATCH --url "http://localhost:5201/users/22222222-2222-2222-2222-
 
 ## FASE 7 — Actualizaciones del catálogo
 
-### 24. Actualizar sucursal `[Catalog]`
+### 26. Actualizar sucursal `[Catalog]`
 > Admin reemplaza todos los campos editables de una sucursal.
 
 ```
@@ -250,7 +273,7 @@ curl --request PUT --url "http://localhost:5202/branches/44444444-4444-4444-4444
 
 ---
 
-### 25. Cambiar estado de sucursal `[Catalog]`
+### 27. Cambiar estado de sucursal `[Catalog]`
 > Una sucursal inactiva desaparece del portal público de inmediato.
 
 ```
@@ -259,7 +282,7 @@ curl --request PATCH --url "http://localhost:5202/branches/44444444-4444-4444-44
 
 ---
 
-### 26. Actualizar servicio `[Catalog]`
+### 28. Actualizar servicio `[Catalog]`
 > Admin reemplaza todos los campos editables de un servicio.
 
 ```
@@ -268,7 +291,7 @@ curl --request PUT --url "http://localhost:5202/services/55555555-5555-5555-5555
 
 ---
 
-### 27. Cambiar estado de servicio `[Catalog]`
+### 29. Cambiar estado de servicio `[Catalog]`
 > Un servicio inactivo no aparece en el portal público ni acepta reservas.
 
 ```
@@ -279,7 +302,7 @@ curl --request PATCH --url "http://localhost:5202/services/55555555-5555-5555-55
 
 ## FASE 8 — Bajas lógicas
 
-### 28. Eliminar usuario `[Identity]`
+### 30. Eliminar usuario `[Identity]`
 > Baja lógica: estado pasa a inactive, JWT invalidados. Responde 204 sin body.
 
 ```
@@ -288,7 +311,18 @@ curl --request DELETE --url "http://localhost:5201/users/22222222-2222-2222-2222
 
 ---
 
-### 29. Eliminar sucursal `[Catalog]`
+### 31. Desvincular servicio de sucursal `[Catalog]`
+> HU-009 — `PLANIFICADO`: responde 404 hasta implementación. Baja lógica de la relación:
+> la vinculación pasa a inactiva y el servicio deja de aparecer en esa sucursal en el portal
+> público. El servicio y la sucursal siguen existiendo. Responde 204 sin body.
+
+```
+curl --request DELETE --url "http://localhost:5202/branches/44444444-4444-4444-4444-444444444444/services/55555555-5555-5555-5555-555555555555" --header "Authorization: Bearer PEGAR_TENANT_ADMIN_TOKEN"
+```
+
+---
+
+### 32. Eliminar sucursal `[Catalog]`
 > Baja lógica: la sucursal se desactiva pero se conservan sus relaciones. Devuelve DTO actualizado.
 
 ```
@@ -297,7 +331,7 @@ curl --request DELETE --url "http://localhost:5202/branches/44444444-4444-4444-4
 
 ---
 
-### 30. Eliminar servicio `[Catalog]`
+### 33. Eliminar servicio `[Catalog]`
 > Baja lógica: el servicio se desactiva pero se conservan reservas y auditoría asociadas. Devuelve DTO actualizado.
 
 ```
