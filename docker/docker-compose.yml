@@ -1,0 +1,153 @@
+version: "2.4"
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-reservas}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-reservas_dev}
+      POSTGRES_DB: ${POSTGRES_DB:-reservas_mvp}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ../database/postgres:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - reservas-network
+
+  cassandra:
+    image: cassandra:5.0
+    environment:
+      CASSANDRA_CLUSTER_NAME: reservas_reports_cluster
+      CASSANDRA_DC: datacenter1
+      CASSANDRA_ENDPOINT_SNITCH: GossipingPropertyFileSnitch
+    ports:
+      - "${CASSANDRA_PORT:-9042}:9042"
+    volumes:
+      - cassandra_data:/var/lib/cassandra
+    healthcheck:
+      test: ["CMD-SHELL", "cqlsh -e 'DESCRIBE KEYSPACES' || exit 1"]
+      interval: 20s
+      timeout: 10s
+      retries: 15
+      start_period: 40s
+    networks:
+      - reservas-network
+
+  cassandra-init:
+    image: cassandra:5.0
+    depends_on:
+      cassandra:
+        condition: service_healthy
+    entrypoint:
+      - /bin/bash
+      - -c
+      - cqlsh cassandra 9042 -f /scripts/001_keyspace.cql && cqlsh cassandra 9042 -k reservas_reports -f /scripts/002_reports_tables.cql
+    volumes:
+      - ../database/cassandra:/scripts:ro
+    networks:
+      - reservas-network
+
+  identity-api:
+    build:
+      context: ..
+      dockerfile: docker/IdentityService.Dockerfile
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ConnectionStrings__Postgres: Host=postgres;Port=5432;Database=${POSTGRES_DB:-reservas_mvp};Username=${POSTGRES_USER:-reservas};Password=${POSTGRES_PASSWORD:-reservas_dev};Search Path=identity
+      Jwt__Secret: ${JWT_SECRET:-dev_secret_change_me_before_production}
+      Jwt__Issuer: ${JWT_ISSUER:-reservas-mvp}
+      Jwt__Audience: ${JWT_AUDIENCE:-reservas-mvp-web}
+    ports:
+      - "${IDENTITY_API_PORT:-5101}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - reservas-network
+
+  catalog-api:
+    build:
+      context: ..
+      dockerfile: docker/CatalogService.Dockerfile
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ConnectionStrings__Postgres: Host=postgres;Port=5432;Database=${POSTGRES_DB:-reservas_mvp};Username=${POSTGRES_USER:-reservas};Password=${POSTGRES_PASSWORD:-reservas_dev};Search Path=catalog
+      Services__IdentityBaseUrl: http://identity-api:8080
+      Jwt__Secret: ${JWT_SECRET:-dev_secret_change_me_before_production}
+      Jwt__Issuer: ${JWT_ISSUER:-reservas-mvp}
+      Jwt__Audience: ${JWT_AUDIENCE:-reservas-mvp-web}
+    ports:
+      - "${CATALOG_API_PORT:-5102}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      identity-api:
+        condition: service_started
+    restart: unless-stopped
+    networks:
+      - reservas-network
+
+  reporting-api:
+    build:
+      context: ..
+      dockerfile: docker/ReportingService.Dockerfile
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      Cassandra__ContactPoints__0: cassandra
+      Cassandra__Port: 9042
+      Cassandra__Keyspace: reservas_reports
+      Cassandra__LocalDatacenter: datacenter1
+      Services__IdentityBaseUrl: http://identity-api:8080
+      Jwt__Secret: ${JWT_SECRET:-dev_secret_change_me_before_production}
+      Jwt__Issuer: ${JWT_ISSUER:-reservas-mvp}
+      Jwt__Audience: ${JWT_AUDIENCE:-reservas-mvp-web}
+    ports:
+      - "${REPORTING_API_PORT:-5104}:8080"
+    depends_on:
+      cassandra-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    networks:
+      - reservas-network
+
+  booking-api:
+    build:
+      context: ..
+      dockerfile: docker/BookingService.Dockerfile
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ConnectionStrings__Postgres: Host=postgres;Port=5432;Database=${POSTGRES_DB:-reservas_mvp};Username=${POSTGRES_USER:-reservas};Password=${POSTGRES_PASSWORD:-reservas_dev};Search Path=booking
+      Services__CatalogBaseUrl: http://catalog-api:8080
+      Services__IdentityBaseUrl: http://identity-api:8080
+      Services__ReportingBaseUrl: http://reporting-api:8080
+      Outbox__WorkerEnabled: "true"
+      Jwt__Secret: ${JWT_SECRET:-dev_secret_change_me_before_production}
+      Jwt__Issuer: ${JWT_ISSUER:-reservas-mvp}
+      Jwt__Audience: ${JWT_AUDIENCE:-reservas-mvp-web}
+    ports:
+      - "${BOOKING_API_PORT:-5103}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      catalog-api:
+        condition: service_started
+      reporting-api:
+        condition: service_started
+    restart: unless-stopped
+    networks:
+      - reservas-network
+
+volumes:
+  postgres_data:
+  cassandra_data:
+
+networks:
+  reservas-network:
+    driver: bridge

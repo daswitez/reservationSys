@@ -1,0 +1,73 @@
+@IdentityService_HostAddress = http://localhost:5101
+
+GET {{IdentityService_HostAddress}}/health
+Accept: application/json
+
+###
+
+GET {{IdentityService_HostAddress}}/tenants/public
+Accept: application/json
+
+###
+
+POST {{IdentityService_HostAddress}}/auth/login
+Content-Type: application/json
+
+{
+  "email": "admin@demo.local",
+  "password": "Password123"
+}
+
+###
+
+POST {{IdentityService_HostAddress}}/auth/register-client
+Content-Type: application/json
+
+{
+  "firstName": "Daniel",
+  "lastName": "Mercado",
+  "email": "daniel@test.com",
+  "phone": "+59170000000",
+  "password": "Password123"
+}
+
+###
+
+GET {{IdentityService_HostAddress}}/auth/me
+Authorization: Bearer {{accessToken}}
+
+###
+
+GET {{IdentityService_HostAddress}}/auth/access/branches/{{branchId}}
+Authorization: Bearer {{accessToken}}
+
+###
+
+GET {{IdentityService_HostAddress}}/users?status=active&offset=0&limit=100
+Authorization: Bearer {{accessToken}}
+
+###
+
+PUT {{IdentityService_HostAddress}}/users/me
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{
+  "firstName": "Daniel",
+  "lastName": "Mercado",
+  "email": "daniel@test.com",
+  "phone": "+59170000000"
+}
+
+###
+
+PATCH {{IdentityService_HostAddress}}/users/me/password
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{
+  "currentPassword": "Password123",
+  "newPassword": "Password456"
+}
+
+###

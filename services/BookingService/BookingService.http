@@ -1,0 +1,6 @@
+@BookingService_HostAddress = http://localhost:5103
+
+GET {{BookingService_HostAddress}}/health
+Accept: application/json
+
+###

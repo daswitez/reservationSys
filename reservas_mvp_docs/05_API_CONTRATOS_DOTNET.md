@@ -1,0 +1,1321 @@
+# Contratos de API .NET
+
+Este documento define endpoints y DTOs base para que los agentes puedan construir las APIs sin inventar flujos raros.
+
+## Convenciones generales
+
+Respuesta exitosa:
+
+```json
+{
+  "success": true,
+  "data": {},
+  "error": null
+}
+```
+
+Respuesta de error:
+
+```json
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "SLOT_ALREADY_TAKEN",
+    "message": "El horario seleccionado ya no está disponible."
+  }
+}
+```
+
+Headers:
+
+```txt
+Authorization: Bearer <jwt>
+X-Correlation-Id: <uuid opcional>
+Idempotency-Key: <uuid para POST /reservations>
+```
+
+Para operaciones administrativas privadas, el `tenant_id` se toma del JWT. Un
+cliente global no tiene ese claim: el negocio se elige mediante `tenantSlug` o los
+identificadores de sucursal/servicio, y el backend valida que todos pertenezcan al
+mismo tenant antes de crear la reserva.
+
+## Códigos de error comunes
+
+- `UNAUTHORIZED`
+- `FORBIDDEN`
+- `VALIDATION_ERROR`
+- `TENANT_NOT_FOUND`
+- `BRANCH_NOT_FOUND`
+- `SERVICE_NOT_FOUND`
+- `RESOURCE_NOT_FOUND`
+- `RESOURCE_NOT_AVAILABLE`
+- `SLOT_ALREADY_TAKEN`
+- `RESOURCE_BLOCKED`
+- `RESERVATION_NOT_FOUND`
+- `REPORT_NOT_READY`
+
+## Identity & Tenancy Service
+
+Base URL local del entorno Docker actual: `http://localhost:5201`
+
+### POST /auth/login
+
+Request:
+
+```json
+{
+  "email": "cliente@test.com",
+  "password": "Password123"
+}
+```
+
+Response:
+
+```json
+{
+  "success": true,
+  "data": {
+    "accessToken": "jwt",
+    "expiresIn": 3600,
+    "user": {
+      "userId": "uuid",
+      "tenantId": null,
+      "email": "cliente@test.com",
+      "fullName": "Cliente Test",
+      "roles": ["client"]
+    }
+  },
+  "error": null
+}
+```
+
+El JWT está firmado y siempre contiene `user_id` y `roles`. Incluye `tenant_id`
+solo para usuarios asociados a una empresa; los clientes globales no lo reciben. Los usuarios con
+estado `inactive` o `blocked` reciben `401 Unauthorized`, igual que las credenciales
+incorrectas. La respuesta incluye `Cache-Control: no-store` y `Pragma: no-cache`.
+En cada request autenticado, Identity vuelve a comprobar que el usuario siga activo,
+que el tenant coincida y que los roles del token sigan vigentes.
+
+### POST /auth/register-client
+
+Registra de forma independiente un cliente global de la plataforma. No requiere
+seleccionar empresa y no es una operación del administrador.
+
+Request:
+
+```json
+{
+  "firstName": "Daniel",
+  "lastName": "Mercado",
+  "email": "daniel@test.com",
+  "phone": "+59170000000",
+  "password": "Password123"
+}
+```
+
+Response:
+
+```json
+{
+  "success": true,
+  "data": {
+    "userId": "uuid",
+    "email": "daniel@test.com",
+    "roles": ["client"],
+    "status": "active",
+    "createdAt": "2026-06-13T12:00:00Z"
+  },
+  "error": null
+}
+```
+
+El email se normaliza a minúsculas y es único globalmente. La contraseña se
+almacena hasheada con BCrypt. El usuario se crea con `tenant_id = NULL` y puede
+consultar todos los negocios activos antes de elegir dónde reservar.
+
+### GET /auth/me
+
+Devuelve el usuario autenticado. Siempre valida `user_id`. Para usuarios internos
+también valida que el `tenant_id` del JWT coincida con el persistido; para clientes
+globales ambos son nulos.
+
+### GET /auth/access/branches/{branchId}
+
+Valida acceso administrativo a una sucursal.
+
+- `client`: `403 Forbidden`.
+- `tenant_admin`: acceso a cualquier sucursal que pertenezca a su `tenant_id`.
+- `branch_admin`: acceso solo cuando existe una asignación en
+  `identity.user_branch_access` para su usuario, tenant y sucursal.
+- Una sucursal de otro tenant siempre devuelve `403 Forbidden`.
+
+Este endpoint toma `user_id`, `tenant_id` y `roles` exclusivamente del JWT. No se
+acepta un tenant enviado por body o query string para decidir autorización.
+
+### POST /users/admin
+
+Crea un administrador asociado a una empresa. Solo `super_admin`.
+
+Request:
+
+```json
+{
+  "tenantId": "uuid",
+  "firstName": "Ana",
+  "lastName": "Perez",
+  "email": "admin@empresa.com",
+  "phone": "+59170000000",
+  "password": "Password123"
+}
+```
+
+El usuario se crea con estado `active`, contraseña hasheada y rol `tenant_admin`.
+Después puede autenticarse mediante `POST /auth/login`; el JWT resultante incluye
+`user_id`, `tenant_id` y `roles`.
+
+### GET /users
+
+Lista usuarios para administracion. Permite filtrar por `tenantId`, `role`,
+`status` y `search`. La paginacion usa `offset` desde 0 y un `limit` entre 1 y 200;
+la respuesta incluye `total` antes de paginar.
+
+- `super_admin`: puede consultar todos los usuarios y filtrar por tenant.
+- `tenant_admin`: siempre queda limitado al `tenant_id` del JWT.
+- `client`: `403 Forbidden`.
+
+### GET /users/{userId}
+
+Devuelve el detalle administrativo del usuario, incluidos roles, sucursales
+asignadas, estado y fechas. Un `tenant_admin` no puede consultar otro tenant.
+
+### PUT /users/{userId}
+
+Edita nombre, apellido, email y telefono. No permite cambiar tenant, rol, estado
+ni contrasena. El email continua siendo unico globalmente.
+
+### PATCH /users/{userId}/status
+
+Actualiza el estado a `active`, `inactive` o `blocked`. Al desactivar o bloquear
+una cuenta, sus JWT anteriores dejan de ser validos inmediatamente. Un
+administrador no puede desactivar su propia cuenta.
+
+### DELETE /users/{userId}
+
+Realiza una baja logica: conserva al usuario y sus relaciones, cambia el estado a
+`inactive` e invalida sus JWT. No se eliminan registros que puedan estar asociados
+a reservas o auditoria.
+
+### PUT /users/me
+
+Permite que cualquier usuario activo, incluido un cliente global, edite su propio
+nombre, apellido, email y telefono. Si cambia el email, debe iniciar sesion otra
+vez porque los JWT anteriores se invalidan.
+
+### PATCH /users/me/password
+
+Request:
+
+```json
+{
+  "currentPassword": "Password123",
+  "newPassword": "Password456"
+}
+```
+
+Valida la contrasena actual, guarda la nueva con BCrypt e invalida todos los JWT
+emitidos antes del cambio.
+
+### POST /tenants
+
+Crea empresa/tenant. Solo `super_admin`.
+
+Request:
+
+```json
+{
+  "name": "Peluquería Demo",
+  "slug": "peluqueria-demo",
+  "mainCategory": "Belleza",
+  "timezone": "America/La_Paz"
+}
+```
+
+### GET /tenants/public
+
+Lista todos los tenants activos para el portal público. No requiere JWT y no se
+filtra por usuario, porque una cuenta `client` puede explorar todos los negocios.
+
+## Catalog Service
+
+Base URL local del entorno Docker actual: `http://localhost:5202`
+
+### GET /public/tenants/{tenantSlug}/branches
+
+Lista sucursales publicas activas de un tenant activo. No requiere JWT.
+
+- Devuelve `404 TENANT_NOT_FOUND` si el slug no existe o el tenant esta inactivo.
+- Nunca incluye sucursales con estado `inactive`.
+- La respuesta usa el mismo DTO de sucursal documentado en `GET /branches/{branchId}`.
+
+### GET /public/tenants/{tenantSlug}/branches/{branchId}/services
+
+Lista servicios activos disponibles en una sucursal.
+
+### GET /branches
+
+Lista las sucursales del tenant autenticado. Solo `tenant_admin`.
+
+Query params opcionales:
+
+```txt
+status=active|inactive
+```
+
+El `tenant_id` se toma exclusivamente del JWT. La respuesta no incluye sucursales
+de otros tenants.
+
+### GET /branches/{branchId}
+
+Devuelve el detalle de una sucursal del tenant autenticado. Solo `tenant_admin`.
+Una sucursal inexistente o perteneciente a otro tenant devuelve
+`404 BRANCH_NOT_FOUND` para no exponer informacion cross-tenant.
+
+Response:
+
+```json
+{
+  "success": true,
+  "data": {
+    "branchId": "uuid",
+    "tenantId": "uuid",
+    "name": "Sucursal Centro",
+    "address": "Av. Principal #123",
+    "phone": "+59170000000",
+    "emailContact": "centro@test.com",
+    "timezone": "America/La_Paz",
+    "status": "active",
+    "createdAt": "2026-06-13T12:00:00Z",
+    "updatedAt": "2026-06-13T12:00:00Z"
+  },
+  "error": null
+}
+```
+
+### POST /branches
+
+Crea una sucursal para el tenant autenticado. Solo `tenant_admin`. El request no
+acepta `tenantId`; se deriva del JWT. Devuelve `201 Created` y header `Location`.
+
+Request:
+
+```json
+{
+  "name": "Sucursal Centro",
+  "address": "Av. Principal #123",
+  "phone": "+59170000000",
+  "emailContact": "centro@test.com",
+  "timezone": "America/La_Paz",
+  "status": "active"
+}
+```
+
+`name`, `address`, `phone` y `timezone` son obligatorios. `emailContact` es
+opcional. `status` admite `active` o `inactive` y usa `active` por defecto. La
+zona horaria debe existir en la base IANA disponible para .NET.
+
+### PUT /branches/{branchId}
+
+Actualiza todos los datos editables de una sucursal del tenant autenticado. Solo
+`tenant_admin`.
+
+Request:
+
+```json
+{
+  "name": "Sucursal Norte",
+  "address": "Av. Norte #456",
+  "phone": "+59171111111",
+  "emailContact": "norte@test.com",
+  "timezone": "America/La_Paz",
+  "status": "active"
+}
+```
+
+No permite cambiar `branchId` ni `tenantId`. Devuelve `404 BRANCH_NOT_FOUND` si
+la sucursal no pertenece al tenant del JWT.
+
+### PATCH /branches/{branchId}/status
+
+Activa o desactiva una sucursal. Solo `tenant_admin`.
+
+Request:
+
+```json
+{
+  "status": "inactive"
+}
+```
+
+Una sucursal inactiva deja de aparecer inmediatamente en
+`GET /public/tenants/{tenantSlug}/branches` y no debe aceptarse para nuevas
+reservas.
+
+### DELETE /branches/{branchId}
+
+Realiza una baja logica. Solo `tenant_admin`. Conserva la sucursal y sus
+relaciones, cambia su estado a `inactive` y devuelve el DTO actualizado. No se
+realiza borrado fisico porque la sucursal puede tener recursos, horarios,
+reservas o datos de auditoria asociados.
+
+### GET /public/tenants/{tenantSlug}/services
+
+Lista los servicios activos de un tenant activo para el portal publico. No
+requiere JWT.
+
+- Devuelve `404 TENANT_NOT_FOUND` si el slug no existe o el tenant esta inactivo.
+- Nunca incluye servicios con estado `inactive`.
+- Este endpoint representa el catalogo general del tenant. La disponibilidad de
+  un servicio en una sucursal concreta depende de HU-009 y se consulta mediante
+  `GET /public/tenants/{tenantSlug}/branches/{branchId}/services`.
+
+### GET /services
+
+Lista los servicios del tenant autenticado. Solo `tenant_admin`.
+
+Query params opcionales:
+
+```txt
+status=active|inactive
+```
+
+El `tenant_id` se toma exclusivamente del JWT.
+
+### GET /services/{serviceId}
+
+Devuelve el detalle de un servicio del tenant autenticado. Solo `tenant_admin`.
+Un servicio inexistente o de otro tenant devuelve `404 SERVICE_NOT_FOUND`.
+
+Response:
+
+```json
+{
+  "success": true,
+  "data": {
+    "serviceId": "uuid",
+    "tenantId": "uuid",
+    "name": "Corte de cabello",
+    "description": "Corte clasico o moderno",
+    "durationMinutes": 30,
+    "referencePrice": 50.00,
+    "modality": "presencial",
+    "status": "active",
+    "createdAt": "2026-06-13T12:00:00Z",
+    "updatedAt": "2026-06-13T12:00:00Z"
+  },
+  "error": null
+}
+```
+
+### POST /services
+
+Crea un servicio para el tenant autenticado. Solo `tenant_admin`. El request no
+acepta `tenantId`; se deriva del JWT. Devuelve `201 Created` y header `Location`.
+
+Request:
+
+```json
+{
+  "name": "Corte de cabello",
+  "description": "Corte clásico o moderno",
+  "durationMinutes": 30,
+  "referencePrice": 50,
+  "modality": "presencial",
+  "status": "active"
+}
+```
+
+Reglas:
+
+- `name`, `description` y `modality` son obligatorios.
+- `durationMinutes` debe ser mayor a `0`.
+- `referencePrice` es opcional y, cuando se envia, debe ser mayor o igual a `0`.
+- `modality` admite hasta 30 caracteres y se normaliza a minusculas.
+- `status` admite `active` o `inactive` y usa `active` por defecto.
+
+### PUT /services/{serviceId}
+
+Actualiza todos los datos editables de un servicio del tenant autenticado. Solo
+`tenant_admin`.
+
+Request:
+
+```json
+{
+  "name": "Corte premium",
+  "description": "Corte y asesoramiento",
+  "durationMinutes": 45,
+  "referencePrice": 75.50,
+  "modality": "presencial",
+  "status": "active"
+}
+```
+
+No permite cambiar `serviceId` ni `tenantId`. Mantiene las mismas validaciones
+del alta.
+
+### PATCH /services/{serviceId}/status
+
+Activa o desactiva un servicio. Solo `tenant_admin`.
+
+Request:
+
+```json
+{
+  "status": "inactive"
+}
+```
+
+Un servicio inactivo deja de aparecer inmediatamente en el portal publico y no
+debe aceptarse para nuevas reservas.
+
+### DELETE /services/{serviceId}
+
+Realiza una baja logica. Solo `tenant_admin`. Conserva el servicio y sus
+relaciones, cambia su estado a `inactive` y devuelve el DTO actualizado. No se
+realiza borrado fisico porque puede estar asociado a sucursales, recursos,
+reservas o auditoria.
+
+### POST /branches/{branchId}/services/{serviceId}
+
+Habilita un servicio en una sucursal.
+
+### POST /resources
+
+Crea recurso reservable.
+
+Request:
+
+```json
+{
+  "branchId": "uuid",
+  "name": "Silla 1",
+  "resourceType": "chair",
+  "description": "Silla principal",
+  "capacity": 1
+}
+```
+
+### POST /services/{serviceId}/resources/{resourceId}
+
+Asocia un servicio con un recurso compatible.
+
+### POST /resource-schedules
+
+Crea horario base de recurso.
+
+Request:
+
+```json
+{
+  "branchId": "uuid",
+  "resourceId": "uuid",
+  "dayOfWeek": 1,
+  "startTime": "09:00",
+  "endTime": "18:00",
+  "validFrom": "2026-01-01",
+  "validTo": null
+}
+```
+
+## Booking & Availability Service
+
+Base URL local del entorno Docker actual: `http://localhost:5203`
+
+### GET /availability
+
+Consulta slots disponibles.
+
+Query params:
+
+```txt
+tenantSlug=peluqueria-demo
+branchId=uuid
+serviceId=uuid
+date=2026-06-12
+```
+
+Response:
+
+```json
+{
+  "branchId": "uuid",
+  "serviceId": "uuid",
+  "date": "2026-06-12",
+  "slotMinutes": 15,
+  "availableSlots": [
+    {
+      "resourceId": "uuid",
+      "resourceName": "Silla 1",
+      "startAt": "2026-06-12T09:00:00-04:00",
+      "endAt": "2026-06-12T09:30:00-04:00"
+    }
+  ]
+}
+```
+
+### POST /reservations
+
+Crea reserva confirmada.
+
+Para un usuario `client`, `client_user_id` se toma de `user_id` en el JWT. El
+tenant no viene del JWT del cliente: Booking lo deriva de la sucursal y servicio
+seleccionados y valida que pertenezcan al mismo negocio.
+
+Request:
+
+```json
+{
+  "branchId": "uuid",
+  "serviceId": "uuid",
+  "resourceId": "uuid",
+  "startAt": "2026-06-12T09:00:00-04:00",
+  "notes": "Quiero corte bajo"
+}
+```
+
+Response:
+
+```json
+{
+  "reservationId": "uuid",
+  "status": "CONFIRMED",
+  "startAt": "2026-06-12T09:00:00-04:00",
+  "endAt": "2026-06-12T09:30:00-04:00"
+}
+```
+
+Errores posibles:
+
+- `409 SLOT_ALREADY_TAKEN`
+- `409 RESOURCE_BLOCKED`
+- `400 VALIDATION_ERROR`
+
+### PATCH /reservations/{reservationId}/cancel
+
+Cancela reserva simple.
+
+Request:
+
+```json
+{
+  "reason": "Cancelado por el cliente"
+}
+```
+
+No hay políticas de cancelación. Si la reserva existe y está confirmada, se cancela.
+
+### PATCH /reservations/{reservationId}/attend
+
+Marca reserva como atendida. Solo usuarios internos.
+
+### PATCH /reservations/{reservationId}/no-show
+
+Marca reserva como no-show. Solo usuarios internos.
+
+### GET /admin/agenda
+
+Query params:
+
+```txt
+branchId=uuid
+date=2026-06-12
+resourceId=uuid opcional
+status=CONFIRMED opcional
+```
+
+Devuelve reservas y bloqueos del día.
+
+### POST /resource-blocks
+
+Crea bloqueo manual.
+
+Request:
+
+```json
+{
+  "branchId": "uuid",
+  "resourceId": "uuid",
+  "startAt": "2026-06-12T13:00:00-04:00",
+  "endAt": "2026-06-12T15:00:00-04:00",
+  "reason": "Silla en mantenimiento",
+  "blockType": "manual"
+}
+```
+
+### PATCH /resource-blocks/{blockId}/cancel
+
+Cancela un bloqueo manual.
+
+## Reporting Service
+
+Base URL local del entorno Docker actual: `http://localhost:5204`
+
+Reporting lee desde Cassandra. Los reportes pueden tener unos segundos de retraso respecto a PostgreSQL.
+
+### GET /reports/daily-summary
+
+Query params:
+
+```txt
+date=2026-06-12
+```
+
+Response:
+
+```json
+{
+  "tenantId": "uuid",
+  "date": "2026-06-12",
+  "totalCreated": 20,
+  "totalConfirmed": 14,
+  "totalCancelled": 3,
+  "totalAttended": 2,
+  "totalNoShow": 1,
+  "totalReservedMinutes": 600,
+  "updatedAt": "2026-06-12T20:00:00Z"
+}
+```
+
+### GET /reports/branches/{branchId}/daily-summary
+
+Query params:
+
+```txt
+from=2026-06-01
+to=2026-06-12
+```
+
+Devuelve resumen por día para una sucursal.
+
+### GET /reports/services/top
+
+Query params:
+
+```txt
+month=2026-06
+```
+
+Devuelve ranking de servicios más reservados.
+
+### GET /reports/resources/occupancy
+
+Query params:
+
+```txt
+branchId=uuid
+date=2026-06-12
+```
+
+Devuelve ocupación por recurso.
+
+### GET /reports/peak-hours
+
+Query params:
+
+```txt
+branchId=uuid
+date=2026-06-12
+```
+
+Devuelve cantidad de reservas por hora.
+
+### POST /internal/report-events
+
+Endpoint interno usado por el outbox worker de Booking.
+
+Request:
+
+```json
+{
+  "eventId": "uuid",
+  "eventType": "ReservationCreated",
+  "occurredAt": "2026-06-12T10:00:00Z",
+  "tenantId": "uuid",
+  "branchId": "uuid",
+  "serviceId": "uuid",
+  "resourceId": "uuid",
+  "reservationId": "uuid",
+  "startAt": "2026-06-12T09:00:00-04:00",
+  "endAt": "2026-06-12T09:30:00-04:00",
+  "status": "CONFIRMED",
+  "durationMinutes": 30,
+  "serviceName": "Corte de cabello",
+  "branchName": "Sucursal Centro",
+  "resourceName": "Silla 1"
+}
+```
+
+Response:
+
+```json
+{
+  "accepted": true
+}
+```
+
+## Guia ejecutable para curl y Postman
+
+Esta seccion contiene una prueba para **cada endpoint documentado**. Los bloques
+se pueden ejecutar en Bash o importar en Postman mediante `Import > Raw text`.
+
+Estado al 14 de junio de 2026:
+
+- `IMPLEMENTADO`: disponible en el entorno Docker actual.
+- `PLANIFICADO`: contrato definido, pero el endpoint todavia responde `404`.
+
+### Preparacion del entorno
+
+Se recomienda tener `curl` y `jq`. Los datos seed se cargan desde
+`database/postgres/005_seed_demo.sql`.
+
+```bash
+export IDENTITY_URL="http://localhost:5201"
+export CATALOG_URL="http://localhost:5202"
+export BOOKING_URL="http://localhost:5203"
+export REPORTING_URL="http://localhost:5204"
+
+export TENANT_ID="11111111-1111-1111-1111-111111111111"
+export TENANT_SLUG="peluqueria-demo"
+export SUPER_ADMIN_ID="00000000-0000-0000-0000-000000000001"
+export TENANT_ADMIN_ID="22222222-2222-2222-2222-222222222222"
+export CLIENT_ID="33333333-3333-3333-3333-333333333333"
+export BRANCH_ID="44444444-4444-4444-4444-444444444444"
+export SERVICE_ID="55555555-5555-5555-5555-555555555555"
+export RESOURCE_ID="66666666-6666-6666-6666-666666666666"
+export TEST_DATE="2026-06-15"
+export RUN_ID="$(date +%s)"
+```
+
+Obtener los tres JWT seed:
+
+```bash
+export SUPER_ADMIN_TOKEN="$(curl -sS -X POST "$IDENTITY_URL/auth/login" \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"superadmin@demo.local","password":"Password123"}' \
+  | jq -r '.data.accessToken')"
+
+export TENANT_ADMIN_TOKEN="$(curl -sS -X POST "$IDENTITY_URL/auth/login" \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"admin@demo.local","password":"Password123"}' \
+  | jq -r '.data.accessToken')"
+
+export CLIENT_TOKEN="$(curl -sS -X POST "$IDENTITY_URL/auth/login" \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"cliente@demo.local","password":"Password123"}' \
+  | jq -r '.data.accessToken')"
+```
+
+Para Postman, crear variables de entorno equivalentes sin `$` ni llaves, por
+ejemplo `identityUrl`, `tenantAdminToken` y `branchId`. Al importar un curl que
+contiene variables Bash, reemplazarlas por `{{identityUrl}}`,
+`{{tenantAdminToken}}` y `{{branchId}}`.
+
+### Identity - comandos ejecutables
+
+#### POST /auth/login
+
+Estado: `IMPLEMENTADO`. Autenticacion: publica.
+
+```bash
+curl -sS -X POST "$IDENTITY_URL/auth/login" \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"admin@demo.local","password":"Password123"}' | jq
+```
+
+#### POST /auth/register-client
+
+Estado: `IMPLEMENTADO`. Autenticacion: publica. El email usa `RUN_ID` para poder
+repetir la prueba.
+
+```bash
+export TEST_CLIENT_EMAIL="postman.client.$RUN_ID@example.com"
+curl -sS -X POST "$IDENTITY_URL/auth/register-client" \
+  -H 'Content-Type: application/json' \
+  -d "{\"firstName\":\"Cliente\",\"lastName\":\"Postman\",\"email\":\"$TEST_CLIENT_EMAIL\",\"phone\":\"+59170000100\",\"password\":\"Password123\"}" | jq
+```
+
+#### GET /auth/me
+
+Estado: `IMPLEMENTADO`. Autenticacion: cualquier JWT valido.
+
+```bash
+curl -sS "$IDENTITY_URL/auth/me" \
+  -H "Authorization: Bearer $TENANT_ADMIN_TOKEN" | jq
+```
+
+#### GET /auth/access/branches/{branchId}
+
+Estado: `IMPLEMENTADO`. Autenticacion: usuario administrativo del tenant.
+
+```bash
+curl -sS "$IDENTITY_URL/auth/access/branches/$BRANCH_ID" \
+  -H "Authorization: Bearer $TENANT_ADMIN_TOKEN" | jq
+```
+
+#### POST /tenants
+
+Estado: `IMPLEMENTADO`. Autenticacion: `super_admin`. Crea un tenant desechable y
+guarda su ID para las pruebas de usuarios.
+
+```bash
+export TEST_TENANT_RESPONSE="$(curl -sS -X POST "$IDENTITY_URL/tenants" \
+  -H "Authorization: Bearer $SUPER_ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d "{\"name\":\"Empresa Postman $RUN_ID\",\"slug\":\"empresa-postman-$RUN_ID\",\"mainCategory\":\"Servicios\",\"timezone\":\"America/La_Paz\",\"status\":\"active\"}")"
+echo "$TEST_TENANT_RESPONSE" | jq
+export TEST_TENANT_ID="$(echo "$TEST_TENANT_RESPONSE" | jq -r '.data.tenantId')"
+```
+
+#### GET /tenants/public
+
+Estado: `IMPLEMENTADO`. Autenticacion: publica.
+
+```bash
+curl -sS "$IDENTITY_URL/tenants/public" | jq
+```
+
+#### POST /users/admin
+
+Estado: `IMPLEMENTADO`. Autenticacion: `super_admin`. Requiere ejecutar antes
+`POST /tenants` para definir `TEST_TENANT_ID`.
+
+```bash
+export TEST_ADMIN_EMAIL="postman.admin.$RUN_ID@example.com"
+export TEST_ADMIN_RESPONSE="$(curl -sS -X POST "$IDENTITY_URL/users/admin" \
+  -H "Authorization: Bearer $SUPER_ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d "{\"tenantId\":\"$TEST_TENANT_ID\",\"firstName\":\"Admin\",\"lastName\":\"Postman\",\"email\":\"$TEST_ADMIN_EMAIL\",\"phone\":\"+59170000101\",\"password\":\"Password123\"}")"
+echo "$TEST_ADMIN_RESPONSE" | jq
+export TEST_ADMIN_ID="$(echo "$TEST_ADMIN_RESPONSE" | jq -r '.data.userId')"
+```
+
+#### GET /users
+
+Estado: `IMPLEMENTADO`. Autenticacion: `super_admin` o `tenant_admin`.
+
+```bash
+curl -sS "$IDENTITY_URL/users?tenantId=$TENANT_ID&role=tenant_admin&status=active&search=admin&offset=0&limit=20" \
+  -H "Authorization: Bearer $SUPER_ADMIN_TOKEN" | jq
+```
+
+#### GET /users/{userId}
+
+Estado: `IMPLEMENTADO`. Autenticacion: administrador autorizado.
+
+```bash
+curl -sS "$IDENTITY_URL/users/$TENANT_ADMIN_ID" \
+  -H "Authorization: Bearer $TENANT_ADMIN_TOKEN" | jq
+```
+
+#### PUT /users/{userId}
+
+Estado: `IMPLEMENTADO`. Autenticacion: administrador autorizado. Usa el usuario
+desechable creado por `POST /users/admin`.
+
+```bash
+curl -sS -X PUT "$IDENTITY_URL/users/$TEST_ADMIN_ID" \
+  -H "Authorization: Bearer $SUPER_ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d "{\"firstName\":\"Administrador\",\"lastName\":\"Actualizado\",\"email\":\"$TEST_ADMIN_EMAIL\",\"phone\":\"+59170000102\"}" | jq
+```
+
+#### PATCH /users/{userId}/status
+
+Estado: `IMPLEMENTADO`. Autenticacion: administrador autorizado.
+
+```bash
+curl -sS -X PATCH "$IDENTITY_URL/users/$TEST_ADMIN_ID/status" \
+  -H "Authorization: Bearer $SUPER_ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"status":"blocked"}' | jq
+```
+
+#### DELETE /users/{userId}
+
+Estado: `IMPLEMENTADO`. Autenticacion: administrador autorizado. Realiza baja
+logica y responde `204 No Content`.
+
+```bash
+curl -i -X DELETE "$IDENTITY_URL/users/$TEST_ADMIN_ID" \
+  -H "Authorization: Bearer $SUPER_ADMIN_TOKEN"
+```
+
+#### PUT /users/me
+
+Estado: `IMPLEMENTADO`. Autenticacion: cualquier usuario activo. El ejemplo usa
+el cliente desechable creado por `POST /auth/register-client`.
+
+```bash
+export TEST_CLIENT_TOKEN="$(curl -sS -X POST "$IDENTITY_URL/auth/login" \
+  -H 'Content-Type: application/json' \
+  -d "{\"email\":\"$TEST_CLIENT_EMAIL\",\"password\":\"Password123\"}" \
+  | jq -r '.data.accessToken')"
+
+curl -sS -X PUT "$IDENTITY_URL/users/me" \
+  -H "Authorization: Bearer $TEST_CLIENT_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d "{\"firstName\":\"Cliente\",\"lastName\":\"Actualizado\",\"email\":\"$TEST_CLIENT_EMAIL\",\"phone\":\"+59170000103\"}" | jq
+```
+
+#### PATCH /users/me/password
+
+Estado: `IMPLEMENTADO`. Autenticacion: cualquier usuario activo. Invalida el JWT
+usado; volver a iniciar sesion con `Password456` despues de la prueba.
+
+```bash
+curl -sS -X PATCH "$IDENTITY_URL/users/me/password" \
+  -H "Authorization: Bearer $TEST_CLIENT_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"currentPassword":"Password123","newPassword":"Password456"}' | jq
+```
+
+### Catalog - comandos ejecutables
+
+#### GET /public/tenants/{tenantSlug}/branches
+
+Estado: `IMPLEMENTADO`. Autenticacion: publica.
+
+```bash
+curl -sS "$CATALOG_URL/public/tenants/$TENANT_SLUG/branches" | jq
+```
+
+#### GET /public/tenants/{tenantSlug}/branches/{branchId}/services
+
+Estado: `PLANIFICADO` para HU-009. Autenticacion: publica.
+
+```bash
+curl -i "$CATALOG_URL/public/tenants/$TENANT_SLUG/branches/$BRANCH_ID/services"
+```
+
+#### GET /branches
+
+Estado: `IMPLEMENTADO`. Autenticacion: `tenant_admin`.
+
+```bash
+curl -sS "$CATALOG_URL/branches?status=active" \
+  -H "Authorization: Bearer $TENANT_ADMIN_TOKEN" | jq
+```
+
+#### GET /branches/{branchId}
+
+Estado: `IMPLEMENTADO`. Autenticacion: `tenant_admin` del mismo tenant.
+
+```bash
+curl -sS "$CATALOG_URL/branches/$BRANCH_ID" \
+  -H "Authorization: Bearer $TENANT_ADMIN_TOKEN" | jq
+```
+
+#### POST /branches
+
+Estado: `IMPLEMENTADO`. Autenticacion: `tenant_admin`. Guarda el ID creado para
+las pruebas de edicion y baja.
+
+```bash
+export TEST_BRANCH_RESPONSE="$(curl -sS -X POST "$CATALOG_URL/branches" \
+  -H "Authorization: Bearer $TENANT_ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d "{\"name\":\"Sucursal Postman $RUN_ID\",\"address\":\"Av. Pruebas 123\",\"phone\":\"+59170000200\",\"emailContact\":\"sucursal.$RUN_ID@example.com\",\"timezone\":\"America/La_Paz\",\"status\":\"active\"}")"
+echo "$TEST_BRANCH_RESPONSE" | jq
+export TEST_BRANCH_ID="$(echo "$TEST_BRANCH_RESPONSE" | jq -r '.data.branchId')"
+```
+
+#### PUT /branches/{branchId}
+
+Estado: `IMPLEMENTADO`. Autenticacion: `tenant_admin` del mismo tenant.
+
+```bash
+curl -sS -X PUT "$CATALOG_URL/branches/$TEST_BRANCH_ID" \
+  -H "Authorization: Bearer $TENANT_ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Sucursal Postman Actualizada","address":"Av. Pruebas 456","phone":"+59170000201","emailContact":"sucursal.actualizada@example.com","timezone":"America/La_Paz","status":"active"}' | jq
+```
+
+#### PATCH /branches/{branchId}/status
+
+Estado: `IMPLEMENTADO`. Autenticacion: `tenant_admin` del mismo tenant.
+
+```bash
+curl -sS -X PATCH "$CATALOG_URL/branches/$TEST_BRANCH_ID/status" \
+  -H "Authorization: Bearer $TENANT_ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"status":"inactive"}' | jq
+```
+
+#### DELETE /branches/{branchId}
+
+Estado: `IMPLEMENTADO`. Autenticacion: `tenant_admin`. Realiza baja logica.
+
+```bash
+curl -sS -X DELETE "$CATALOG_URL/branches/$TEST_BRANCH_ID" \
+  -H "Authorization: Bearer $TENANT_ADMIN_TOKEN" | jq
+```
+
+#### GET /public/tenants/{tenantSlug}/services
+
+Estado: `IMPLEMENTADO`. Autenticacion: publica.
+
+```bash
+curl -sS "$CATALOG_URL/public/tenants/$TENANT_SLUG/services" | jq
+```
+
+#### GET /services
+
+Estado: `IMPLEMENTADO`. Autenticacion: `tenant_admin`.
+
+```bash
+curl -sS "$CATALOG_URL/services?status=active" \
+  -H "Authorization: Bearer $TENANT_ADMIN_TOKEN" | jq
+```
+
+#### GET /services/{serviceId}
+
+Estado: `IMPLEMENTADO`. Autenticacion: `tenant_admin` del mismo tenant.
+
+```bash
+curl -sS "$CATALOG_URL/services/$SERVICE_ID" \
+  -H "Authorization: Bearer $TENANT_ADMIN_TOKEN" | jq
+```
+
+#### POST /services
+
+Estado: `IMPLEMENTADO`. Autenticacion: `tenant_admin`. Guarda el ID creado para
+las pruebas siguientes.
+
+```bash
+export TEST_SERVICE_RESPONSE="$(curl -sS -X POST "$CATALOG_URL/services" \
+  -H "Authorization: Bearer $TENANT_ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d "{\"name\":\"Servicio Postman $RUN_ID\",\"description\":\"Servicio creado desde curl\",\"durationMinutes\":45,\"referencePrice\":75.50,\"modality\":\"presencial\",\"status\":\"active\"}")"
+echo "$TEST_SERVICE_RESPONSE" | jq
+export TEST_SERVICE_ID="$(echo "$TEST_SERVICE_RESPONSE" | jq -r '.data.serviceId')"
+```
+
+#### PUT /services/{serviceId}
+
+Estado: `IMPLEMENTADO`. Autenticacion: `tenant_admin` del mismo tenant.
+
+```bash
+curl -sS -X PUT "$CATALOG_URL/services/$TEST_SERVICE_ID" \
+  -H "Authorization: Bearer $TENANT_ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Servicio Postman Actualizado","description":"Servicio editado desde curl","durationMinutes":60,"referencePrice":90.00,"modality":"virtual","status":"active"}' | jq
+```
+
+#### PATCH /services/{serviceId}/status
+
+Estado: `IMPLEMENTADO`. Autenticacion: `tenant_admin` del mismo tenant.
+
+```bash
+curl -sS -X PATCH "$CATALOG_URL/services/$TEST_SERVICE_ID/status" \
+  -H "Authorization: Bearer $TENANT_ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"status":"inactive"}' | jq
+```
+
+#### DELETE /services/{serviceId}
+
+Estado: `IMPLEMENTADO`. Autenticacion: `tenant_admin`. Realiza baja logica.
+
+```bash
+curl -sS -X DELETE "$CATALOG_URL/services/$TEST_SERVICE_ID" \
+  -H "Authorization: Bearer $TENANT_ADMIN_TOKEN" | jq
+```
+
+#### POST /branches/{branchId}/services/{serviceId}
+
+Estado: `PLANIFICADO` para HU-009. Autenticacion esperada: `tenant_admin`.
+
+```bash
+curl -i -X POST "$CATALOG_URL/branches/$BRANCH_ID/services/$SERVICE_ID" \
+  -H "Authorization: Bearer $TENANT_ADMIN_TOKEN"
+```
+
+#### POST /resources
+
+Estado: `PLANIFICADO`. Autenticacion esperada: `tenant_admin`.
+
+```bash
+curl -i -X POST "$CATALOG_URL/resources" \
+  -H "Authorization: Bearer $TENANT_ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d "{\"branchId\":\"$BRANCH_ID\",\"name\":\"Silla Postman\",\"resourceType\":\"chair\",\"description\":\"Recurso creado desde curl\",\"capacity\":1,\"status\":\"active\"}"
+```
+
+#### POST /services/{serviceId}/resources/{resourceId}
+
+Estado: `PLANIFICADO`. Autenticacion esperada: `tenant_admin`.
+
+```bash
+curl -i -X POST "$CATALOG_URL/services/$SERVICE_ID/resources/$RESOURCE_ID" \
+  -H "Authorization: Bearer $TENANT_ADMIN_TOKEN"
+```
+
+#### POST /resource-schedules
+
+Estado: `PLANIFICADO`. Autenticacion esperada: `tenant_admin`.
+
+```bash
+curl -i -X POST "$CATALOG_URL/resource-schedules" \
+  -H "Authorization: Bearer $TENANT_ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d "{\"branchId\":\"$BRANCH_ID\",\"resourceId\":\"$RESOURCE_ID\",\"dayOfWeek\":1,\"startTime\":\"09:00\",\"endTime\":\"18:00\",\"validFrom\":\"2026-06-15\",\"validTo\":null}"
+```
+
+### Booking - comandos de contrato
+
+Todos los endpoints de esta seccion estan `PLANIFICADOS`; Booking actualmente
+solo expone `/` y `/health`. Los comandos quedan preparados para su implementacion.
+
+#### GET /availability
+
+Autenticacion esperada: publica.
+
+```bash
+curl -i "$BOOKING_URL/availability?tenantSlug=$TENANT_SLUG&branchId=$BRANCH_ID&serviceId=$SERVICE_ID&date=$TEST_DATE"
+```
+
+#### POST /reservations
+
+Autenticacion esperada: `client`. `Idempotency-Key` debe ser unico por intento.
+
+```bash
+curl -i -X POST "$BOOKING_URL/reservations" \
+  -H "Authorization: Bearer $CLIENT_TOKEN" \
+  -H "Idempotency-Key: $(cat /proc/sys/kernel/random/uuid)" \
+  -H 'Content-Type: application/json' \
+  -d "{\"branchId\":\"$BRANCH_ID\",\"serviceId\":\"$SERVICE_ID\",\"resourceId\":\"$RESOURCE_ID\",\"startAt\":\"2026-06-15T09:00:00-04:00\",\"notes\":\"Reserva de prueba desde curl\"}"
+```
+
+Al implementarse, guardar `data.reservationId` como `RESERVATION_ID`.
+
+#### PATCH /reservations/{reservationId}/cancel
+
+Autenticacion esperada: cliente propietario o usuario interno autorizado.
+
+```bash
+curl -i -X PATCH "$BOOKING_URL/reservations/$RESERVATION_ID/cancel" \
+  -H "Authorization: Bearer $CLIENT_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"reason":"Cancelado desde curl"}'
+```
+
+#### PATCH /reservations/{reservationId}/attend
+
+Autenticacion esperada: usuario interno autorizado.
+
+```bash
+curl -i -X PATCH "$BOOKING_URL/reservations/$RESERVATION_ID/attend" \
+  -H "Authorization: Bearer $TENANT_ADMIN_TOKEN"
+```
+
+#### PATCH /reservations/{reservationId}/no-show
+
+Autenticacion esperada: usuario interno autorizado.
+
+```bash
+curl -i -X PATCH "$BOOKING_URL/reservations/$RESERVATION_ID/no-show" \
+  -H "Authorization: Bearer $TENANT_ADMIN_TOKEN"
+```
+
+#### GET /admin/agenda
+
+Autenticacion esperada: usuario interno autorizado.
+
+```bash
+curl -i "$BOOKING_URL/admin/agenda?branchId=$BRANCH_ID&date=$TEST_DATE&resourceId=$RESOURCE_ID&status=CONFIRMED" \
+  -H "Authorization: Bearer $TENANT_ADMIN_TOKEN"
+```
+
+#### POST /resource-blocks
+
+Autenticacion esperada: usuario interno autorizado.
+
+```bash
+curl -i -X POST "$BOOKING_URL/resource-blocks" \
+  -H "Authorization: Bearer $TENANT_ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d "{\"branchId\":\"$BRANCH_ID\",\"resourceId\":\"$RESOURCE_ID\",\"startAt\":\"2026-06-15T13:00:00-04:00\",\"endAt\":\"2026-06-15T15:00:00-04:00\",\"reason\":\"Mantenimiento de prueba\",\"blockType\":\"manual\"}"
+```
+
+Al implementarse, guardar `data.blockId` como `BLOCK_ID`.
+
+#### PATCH /resource-blocks/{blockId}/cancel
+
+Autenticacion esperada: usuario interno autorizado.
+
+```bash
+curl -i -X PATCH "$BOOKING_URL/resource-blocks/$BLOCK_ID/cancel" \
+  -H "Authorization: Bearer $TENANT_ADMIN_TOKEN"
+```
+
+### Reporting - comandos de contrato
+
+Todos los endpoints de esta seccion estan `PLANIFICADOS`; Reporting actualmente
+solo expone `/` y `/health`.
+
+#### GET /reports/daily-summary
+
+Autenticacion esperada: usuario interno del tenant.
+
+```bash
+curl -i "$REPORTING_URL/reports/daily-summary?date=$TEST_DATE" \
+  -H "Authorization: Bearer $TENANT_ADMIN_TOKEN"
+```
+
+#### GET /reports/branches/{branchId}/daily-summary
+
+Autenticacion esperada: usuario interno autorizado para la sucursal.
+
+```bash
+curl -i "$REPORTING_URL/reports/branches/$BRANCH_ID/daily-summary?from=2026-06-01&to=2026-06-30" \
+  -H "Authorization: Bearer $TENANT_ADMIN_TOKEN"
+```
+
+#### GET /reports/services/top
+
+Autenticacion esperada: usuario interno del tenant.
+
+```bash
+curl -i "$REPORTING_URL/reports/services/top?month=2026-06" \
+  -H "Authorization: Bearer $TENANT_ADMIN_TOKEN"
+```
+
+#### GET /reports/resources/occupancy
+
+Autenticacion esperada: usuario interno autorizado.
+
+```bash
+curl -i "$REPORTING_URL/reports/resources/occupancy?branchId=$BRANCH_ID&date=$TEST_DATE" \
+  -H "Authorization: Bearer $TENANT_ADMIN_TOKEN"
+```
+
+#### GET /reports/peak-hours
+
+Autenticacion esperada: usuario interno autorizado.
+
+```bash
+curl -i "$REPORTING_URL/reports/peak-hours?branchId=$BRANCH_ID&date=$TEST_DATE" \
+  -H "Authorization: Bearer $TENANT_ADMIN_TOKEN"
+```
+
+#### POST /internal/report-events
+
+Autenticacion esperada: llamada interna de Booking. El mecanismo de autenticacion
+servicio-a-servicio se definira al implementar Reporting.
+
+```bash
+curl -i -X POST "$REPORTING_URL/internal/report-events" \
+  -H 'Content-Type: application/json' \
+  -d "{\"eventId\":\"77777777-7777-7777-7777-777777777777\",\"eventType\":\"ReservationCreated\",\"occurredAt\":\"2026-06-15T13:00:00Z\",\"tenantId\":\"$TENANT_ID\",\"branchId\":\"$BRANCH_ID\",\"serviceId\":\"$SERVICE_ID\",\"resourceId\":\"$RESOURCE_ID\",\"reservationId\":\"88888888-8888-8888-8888-888888888888\",\"startAt\":\"2026-06-15T09:00:00-04:00\",\"endAt\":\"2026-06-15T09:30:00-04:00\",\"status\":\"CONFIRMED\",\"durationMinutes\":30,\"serviceName\":\"Corte de cabello\",\"branchName\":\"Sucursal Centro\",\"resourceName\":\"Silla 1\"}"
+```

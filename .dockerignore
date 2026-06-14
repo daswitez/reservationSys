@@ -1,0 +1,9 @@
+.git
+.tools
+**/bin
+**/obj
+apps/web/node_modules
+apps/web/.next
+reservas_mvp_docs
+docs
+README.md
