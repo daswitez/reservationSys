@@ -36,6 +36,38 @@ public sealed class TenantsController(IdentityDbContext dbContext) : ControllerB
         return Ok(ApiResponse<IReadOnlyList<TenantResponse>>.Ok(tenants));
     }
 
+    [AllowAnonymous]
+    [HttpGet("public/{slug}")]
+    [ProducesResponseType(typeof(ApiResponse<TenantResponse>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ApiResponse<object>), StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> GetPublicBySlug(
+        string slug,
+        CancellationToken cancellationToken)
+    {
+        var normalizedSlug = slug.Trim().ToLowerInvariant();
+        var tenant = await dbContext.Tenants
+            .AsNoTracking()
+            .Where(tenant => tenant.Slug == normalizedSlug && tenant.Status == "active")
+            .Select(tenant => new TenantResponse(
+                tenant.TenantId,
+                tenant.Name,
+                tenant.Slug,
+                tenant.MainCategory,
+                tenant.Timezone,
+                tenant.Status,
+                tenant.CreatedAt))
+            .SingleOrDefaultAsync(cancellationToken);
+
+        if (tenant is null)
+        {
+            return NotFound(ApiResponse<object>.Failure(
+                "TENANT_NOT_FOUND",
+                $"No existe un tenant activo con el slug '{normalizedSlug}'."));
+        }
+
+        return Ok(ApiResponse<TenantResponse>.Ok(tenant));
+    }
+
     /// <summary>
     /// Registra una empresa en la plataforma.
     /// </summary>

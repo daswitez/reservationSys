@@ -9,6 +9,9 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
     public DbSet<Branch> Branches => Set<Branch>();
     public DbSet<Service> Services => Set<Service>();
     public DbSet<BranchService> BranchServices => Set<BranchService>();
+    public DbSet<Resource> Resources => Set<Resource>();
+    public DbSet<ServiceResource> ServiceResources => Set<ServiceResource>();
+    public DbSet<ResourceSchedule> ResourceSchedules => Set<ResourceSchedule>();
     public DbSet<CatalogTenant> Tenants => Set<CatalogTenant>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
@@ -58,6 +61,59 @@ public sealed class CatalogDbContext(DbContextOptions<CatalogDbContext> options)
         branchService.Property(entity => entity.CreatedAt).HasColumnName("created_at");
         branchService.HasIndex(entity => new { entity.TenantId, entity.ServiceId })
             .HasDatabaseName("idx_branch_services_tenant");
+
+        var resource = modelBuilder.Entity<Resource>();
+        resource.ToTable("resources", "catalog");
+        resource.HasKey(entity => entity.ResourceId);
+        resource.Property(entity => entity.ResourceId).HasColumnName("resource_id");
+        resource.Property(entity => entity.TenantId).HasColumnName("tenant_id");
+        resource.Property(entity => entity.BranchId).HasColumnName("branch_id");
+        resource.Property(entity => entity.Name).HasColumnName("name").HasMaxLength(150);
+        resource.Property(entity => entity.ResourceType).HasColumnName("resource_type").HasMaxLength(80);
+        resource.Property(entity => entity.Description).HasColumnName("description");
+        resource.Property(entity => entity.Capacity).HasColumnName("capacity");
+        resource.Property(entity => entity.Status).HasColumnName("status").HasMaxLength(30);
+        resource.Property(entity => entity.CreatedAt).HasColumnName("created_at");
+        resource.Property(entity => entity.UpdatedAt).HasColumnName("updated_at");
+        resource.HasIndex(entity => new { entity.TenantId, entity.BranchId, entity.Status })
+            .HasDatabaseName("idx_resources_branch_status");
+
+        var serviceResource = modelBuilder.Entity<ServiceResource>();
+        serviceResource.ToTable("service_resources", "catalog");
+        serviceResource.HasKey(entity => new { entity.ServiceId, entity.ResourceId });
+        serviceResource.Property(entity => entity.TenantId).HasColumnName("tenant_id");
+        serviceResource.Property(entity => entity.ServiceId).HasColumnName("service_id");
+        serviceResource.Property(entity => entity.ResourceId).HasColumnName("resource_id");
+        serviceResource.Property(entity => entity.Required).HasColumnName("required");
+        serviceResource.Property(entity => entity.Priority).HasColumnName("priority");
+        serviceResource.Property(entity => entity.Status).HasColumnName("status").HasMaxLength(30);
+        serviceResource.Property(entity => entity.CreatedAt).HasColumnName("created_at");
+        serviceResource.HasIndex(entity => new { entity.TenantId, entity.ResourceId })
+            .HasDatabaseName("idx_service_resources_resource");
+
+        var resourceSchedule = modelBuilder.Entity<ResourceSchedule>();
+        resourceSchedule.ToTable("resource_schedules", "catalog");
+        resourceSchedule.HasKey(entity => entity.ScheduleId);
+        resourceSchedule.Property(entity => entity.ScheduleId).HasColumnName("schedule_id");
+        resourceSchedule.Property(entity => entity.TenantId).HasColumnName("tenant_id");
+        resourceSchedule.Property(entity => entity.BranchId).HasColumnName("branch_id");
+        resourceSchedule.Property(entity => entity.ResourceId).HasColumnName("resource_id");
+        resourceSchedule.Property(entity => entity.DayOfWeek).HasColumnName("day_of_week");
+        resourceSchedule.Property(entity => entity.StartTime).HasColumnName("start_time");
+        resourceSchedule.Property(entity => entity.EndTime).HasColumnName("end_time");
+        resourceSchedule.Property(entity => entity.ValidFrom).HasColumnName("valid_from");
+        resourceSchedule.Property(entity => entity.ValidTo).HasColumnName("valid_to");
+        resourceSchedule.Property(entity => entity.Status).HasColumnName("status").HasMaxLength(30);
+        resourceSchedule.Property(entity => entity.CreatedAt).HasColumnName("created_at");
+        resourceSchedule.HasIndex(entity => new
+            {
+                entity.TenantId,
+                entity.BranchId,
+                entity.ResourceId,
+                entity.DayOfWeek,
+                entity.Status
+            })
+            .HasDatabaseName("idx_resource_schedules_lookup");
 
         var tenant = modelBuilder.Entity<CatalogTenant>();
         tenant.ToTable("tenants", "identity");

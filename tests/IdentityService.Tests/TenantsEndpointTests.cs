@@ -20,7 +20,11 @@ public sealed class TenantsEndpointTests(IdentityApiFactory factory)
         await using var scope = _factory.Services.CreateAsyncScope();
         var dbContext = scope.ServiceProvider.GetRequiredService<IdentityDbContext>();
         await dbContext.Tenants
-            .Where(tenant => tenant.Slug.StartsWith("test-"))
+            .Where(tenant =>
+                tenant.Slug.StartsWith("test-public-")
+                || tenant.Slug.StartsWith("test-empresa-")
+                || tenant.Slug.StartsWith("test-inactiva-")
+                || tenant.Slug.StartsWith("test-duplicada-"))
             .ExecuteDeleteAsync();
     }
 
@@ -55,6 +59,73 @@ public sealed class TenantsEndpointTests(IdentityApiFactory factory)
         var tenants = payload.RootElement.GetProperty("data").EnumerateArray().ToArray();
         Assert.Contains(tenants, tenant => tenant.GetProperty("slug").GetString() == activeSlug);
         Assert.DoesNotContain(tenants, tenant => tenant.GetProperty("slug").GetString() == inactiveSlug);
+    }
+
+    [Fact]
+    public async Task GetPublicBySlug_WithoutToken_ReturnsActiveTenantDetail()
+    {
+        var slug = $"test-public-detail-{Guid.NewGuid():N}";
+        using var createRequest = AuthorizedRequest(slug, "super_admin");
+        using var createResponse = await _client.SendAsync(createRequest);
+        createResponse.EnsureSuccessStatusCode();
+
+        using var response = await _client.GetAsync($"/tenants/public/{slug}");
+        using var payload = await response.Content.ReadFromJsonAsync<JsonDocument>();
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.NotNull(payload);
+        var data = payload.RootElement.GetProperty("data");
+        Assert.Equal(slug, data.GetProperty("slug").GetString());
+        Assert.Equal("Empresa de prueba", data.GetProperty("name").GetString());
+        Assert.Equal("Servicios", data.GetProperty("mainCategory").GetString());
+        Assert.Equal("America/La_Paz", data.GetProperty("timezone").GetString());
+        Assert.Equal("active", data.GetProperty("status").GetString());
+    }
+
+    [Fact]
+    public async Task GetPublicBySlug_WithInactiveTenant_ReturnsNotFound()
+    {
+        var slug = $"test-public-detail-inactive-{Guid.NewGuid():N}";
+        using var createRequest = AuthorizedRequest(slug, "super_admin", status: "inactive");
+        using var createResponse = await _client.SendAsync(createRequest);
+        createResponse.EnsureSuccessStatusCode();
+
+        using var response = await _client.GetAsync($"/tenants/public/{slug}");
+        using var payload = await response.Content.ReadFromJsonAsync<JsonDocument>();
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+        Assert.NotNull(payload);
+        Assert.Equal(
+            "TENANT_NOT_FOUND",
+            payload.RootElement.GetProperty("error").GetProperty("code").GetString());
+    }
+
+    [Fact]
+    public async Task GetPublicBySlug_WithUnknownSlug_ReturnsNotFound()
+    {
+        var slug = $"test-public-detail-missing-{Guid.NewGuid():N}";
+
+        using var response = await _client.GetAsync($"/tenants/public/{slug}");
+        using var payload = await response.Content.ReadFromJsonAsync<JsonDocument>();
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+        Assert.NotNull(payload);
+        Assert.Equal(
+            "TENANT_NOT_FOUND",
+            payload.RootElement.GetProperty("error").GetProperty("code").GetString());
+    }
+
+    [Fact]
+    public async Task OpenApi_ContainsPublicTenantDetailEndpoint()
+    {
+        using var response = await _client.GetAsync("/swagger/v1/swagger.json");
+        using var payload = await response.Content.ReadFromJsonAsync<JsonDocument>();
+
+        response.EnsureSuccessStatusCode();
+        var paths = payload!.RootElement.GetProperty("paths");
+        Assert.True(paths.TryGetProperty("/tenants/public", out _));
+        Assert.True(paths.TryGetProperty("/tenants/public/{slug}", out var detail));
+        Assert.True(detail.TryGetProperty("get", out _));
     }
 
     [Fact]

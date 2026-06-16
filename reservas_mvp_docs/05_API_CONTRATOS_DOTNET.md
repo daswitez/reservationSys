@@ -246,6 +246,13 @@ Request:
 Lista todos los tenants activos para el portal público. No requiere JWT y no se
 filtra por usuario, porque una cuenta `client` puede explorar todos los negocios.
 
+### GET /tenants/public/{slug}
+
+Devuelve el detalle público de un tenant activo por slug. No requiere JWT. Solo
+incluye información pública del negocio: identificador, nombre, slug, rubro,
+timezone, estado y fecha de creación. Si el slug no existe o el tenant está
+inactivo, devuelve `404 TENANT_NOT_FOUND`.
+
 ## Catalog Service
 
 Base URL local del entorno Docker actual: `http://localhost:5202`
@@ -500,9 +507,53 @@ vinculación pasa a `inactive` y el servicio deja de aparecer en
 sucursal no se modifican. Devuelve `204 No Content`. Si la relación no existe o
 pertenece a otro tenant, devuelve `404 BRANCH_NOT_FOUND`.
 
+### GET /resources
+
+Lista los recursos reservables del tenant autenticado. Solo `tenant_admin`.
+
+Query params opcionales:
+
+```txt
+branchId=uuid
+status=active|blocked|inactive
+```
+
+`active` es el unico estado que debe participar en nuevas reservas. `blocked` e
+`inactive` se conservan para administracion y auditoria, pero Booking debe
+ignorarlos al asignar disponibilidad.
+
+### GET /resources/{resourceId}
+
+Devuelve el detalle de un recurso reservable del tenant autenticado. Solo
+`tenant_admin`. Un recurso inexistente o perteneciente a otro tenant devuelve
+`404 RESOURCE_NOT_FOUND`.
+
+Response:
+
+```json
+{
+  "success": true,
+  "data": {
+    "resourceId": "uuid",
+    "tenantId": "uuid",
+    "branchId": "uuid",
+    "name": "Silla 1",
+    "resourceType": "silla",
+    "description": "Silla principal",
+    "capacity": 1,
+    "status": "active",
+    "createdAt": "2026-06-16T12:00:00Z",
+    "updatedAt": "2026-06-16T12:00:00Z"
+  },
+  "error": null
+}
+```
+
 ### POST /resources
 
-Crea recurso reservable.
+Crea recurso reservable en una sucursal del tenant autenticado. Solo
+`tenant_admin`. El `tenantId` se deriva del JWT y el `branchId` debe pertenecer
+al mismo tenant.
 
 Request:
 
@@ -510,19 +561,193 @@ Request:
 {
   "branchId": "uuid",
   "name": "Silla 1",
-  "resourceType": "chair",
+  "resourceType": "silla",
   "description": "Silla principal",
-  "capacity": 1
+  "capacity": 1,
+  "status": "active"
 }
 ```
 
+Reglas:
+
+- `name`, `resourceType`, `branchId` y `capacity` son obligatorios.
+- `capacity` debe ser mayor a `0`.
+- `resourceType` se normaliza a minusculas. Ejemplos validos: `silla`, `sala`,
+  `profesional`, `equipo`.
+- `status` admite `active`, `blocked` o `inactive`; usa `active` por defecto.
+- Si el `branchId` no existe en el tenant autenticado, devuelve
+  `404 BRANCH_NOT_FOUND`.
+
+### PUT /resources/{resourceId}
+
+Actualiza todos los datos editables de un recurso reservable. Solo
+`tenant_admin`. Permite mover el recurso a otra sucursal del mismo tenant, pero
+no a otro tenant.
+
+Request:
+
+```json
+{
+  "branchId": "uuid",
+  "name": "Sala Norte",
+  "resourceType": "sala",
+  "description": "Sala privada",
+  "capacity": 4,
+  "status": "blocked"
+}
+```
+
+### PATCH /resources/{resourceId}/status
+
+Activa, bloquea o desactiva un recurso reservable. Solo `tenant_admin`.
+
+Request:
+
+```json
+{
+  "status": "blocked"
+}
+```
+
+Un recurso `blocked` o `inactive` no debe recibir nuevas reservas.
+
+### DELETE /resources/{resourceId}
+
+Realiza una baja logica. Solo `tenant_admin`. Conserva el recurso y sus
+relaciones, cambia su estado a `inactive` y devuelve el DTO actualizado.
+
+### GET /services/{serviceId}/resources
+
+Lista recursos asociados a un servicio del tenant autenticado. Solo
+`tenant_admin`.
+
+Query params opcionales:
+
+```txt
+status=active|inactive
+```
+
+### GET /services/{serviceId}/compatible-resources
+
+Lista recursos compatibles y disponibles para nuevas reservas del servicio
+elegido. Solo devuelve asociaciones `active`, servicios `active` y recursos
+`active`; no incluye recursos `blocked` ni `inactive`.
+
+Query params opcionales:
+
+```txt
+branchId=uuid
+```
+
+Esta es la consulta que Booking debe usar para elegir el recurso principal del
+MVP antes de calcular horarios y reservas existentes.
+
 ### POST /services/{serviceId}/resources/{resourceId}
 
-Asocia un servicio con un recurso compatible.
+Asocia un servicio con un recurso compatible. Solo `tenant_admin`. Si la relacion
+ya existe, actualiza `required`, `priority` y `status`; devuelve `201 Created`
+cuando crea y `200 OK` cuando reactiva o actualiza.
+
+Request:
+
+```json
+{
+  "required": true,
+  "priority": 1,
+  "status": "active"
+}
+```
+
+Reglas:
+
+- Servicio y recurso deben pertenecer al tenant autenticado.
+- `priority` debe ser mayor a `0`.
+- `status` admite `active` o `inactive`, y usa `active` por defecto.
+- Para MVP, el recurso con menor `priority` puede tratarse como recurso principal
+  si hay mas de uno compatible.
+
+### PUT /services/{serviceId}/resources/{resourceId}
+
+Actualiza los atributos de compatibilidad entre servicio y recurso. Solo
+`tenant_admin`.
+
+Request:
+
+```json
+{
+  "required": true,
+  "priority": 2,
+  "status": "active"
+}
+```
+
+### PATCH /services/{serviceId}/resources/{resourceId}/status
+
+Activa o desactiva la compatibilidad entre servicio y recurso. Solo
+`tenant_admin`.
+
+Request:
+
+```json
+{
+  "status": "inactive"
+}
+```
+
+### DELETE /services/{serviceId}/resources/{resourceId}
+
+Deshabilita la compatibilidad entre servicio y recurso. Solo `tenant_admin`.
+Baja logica: cambia la relacion a `inactive` y devuelve `204 No Content`.
+
+### GET /resource-schedules
+
+Lista horarios base de recursos del tenant autenticado. Solo `tenant_admin`.
+
+Query params opcionales:
+
+```txt
+branchId=uuid
+resourceId=uuid
+dayOfWeek=1
+status=active|inactive
+```
+
+Booking debe usar horarios `active` del recurso principal compatible para generar
+disponibilidad antes de descontar bloqueos y reservas existentes.
+
+### GET /resource-schedules/{scheduleId}
+
+Devuelve el detalle de un horario base del tenant autenticado. Solo
+`tenant_admin`. Un horario inexistente o perteneciente a otro tenant devuelve
+`404 RESOURCE_SCHEDULE_NOT_FOUND`.
+
+Response:
+
+```json
+{
+  "success": true,
+  "data": {
+    "scheduleId": "uuid",
+    "tenantId": "uuid",
+    "branchId": "uuid",
+    "resourceId": "uuid",
+    "dayOfWeek": 1,
+    "startTime": "09:00",
+    "endTime": "18:00",
+    "validFrom": "2026-06-16",
+    "validTo": null,
+    "status": "active",
+    "createdAt": "2026-06-16T12:00:00Z"
+  },
+  "error": null
+}
+```
 
 ### POST /resource-schedules
 
-Crea horario base de recurso.
+Crea horario base de recurso. Solo `tenant_admin`. `branchId` y `resourceId`
+deben pertenecer al tenant autenticado, y el recurso debe pertenecer a esa
+sucursal.
 
 Request:
 
@@ -538,13 +763,58 @@ Request:
 }
 ```
 
+Reglas:
+
+- `dayOfWeek` debe estar entre `1` y `7`.
+- `startTime` y `endTime` usan formato `HH:mm`.
+- `endTime` debe ser mayor a `startTime`.
+- `validFrom` y `validTo` son opcionales y usan formato `yyyy-MM-dd`.
+- Si ambas fechas vienen informadas, `validTo >= validFrom`.
+- `status` admite `active` o `inactive` y usa `active` por defecto.
+
+### PUT /resource-schedules/{scheduleId}
+
+Actualiza todos los datos editables de un horario base. Solo `tenant_admin`.
+
+Request:
+
+```json
+{
+  "branchId": "uuid",
+  "resourceId": "uuid",
+  "dayOfWeek": 2,
+  "startTime": "10:00",
+  "endTime": "16:30",
+  "validFrom": "2026-06-16",
+  "validTo": "2026-12-31",
+  "status": "active"
+}
+```
+
+### PATCH /resource-schedules/{scheduleId}/status
+
+Activa o desactiva un horario base. Solo `tenant_admin`.
+
+Request:
+
+```json
+{
+  "status": "inactive"
+}
+```
+
+### DELETE /resource-schedules/{scheduleId}
+
+Realiza baja logica del horario base. Solo `tenant_admin`. Cambia el estado a
+`inactive` y devuelve el DTO actualizado.
+
 ## Booking & Availability Service
 
 Base URL local del entorno Docker actual: `http://localhost:5203`
 
 ### GET /availability
 
-Consulta slots disponibles.
+Consulta slots disponibles. No requiere JWT.
 
 Query params:
 
@@ -552,31 +822,53 @@ Query params:
 tenantSlug=peluqueria-demo
 branchId=uuid
 serviceId=uuid
-date=2026-06-12
+date=2026-06-17
 ```
 
 Response:
 
 ```json
 {
-  "branchId": "uuid",
-  "serviceId": "uuid",
-  "date": "2026-06-12",
-  "slotMinutes": 15,
-  "availableSlots": [
-    {
-      "resourceId": "uuid",
-      "resourceName": "Silla 1",
-      "startAt": "2026-06-12T09:00:00-04:00",
-      "endAt": "2026-06-12T09:30:00-04:00"
-    }
-  ]
+  "success": true,
+  "data": {
+    "branchId": "uuid",
+    "serviceId": "uuid",
+    "date": "2026-06-17",
+    "slotMinutes": 15,
+    "availableSlots": [
+      {
+        "resourceId": "uuid",
+        "resourceName": "Silla 1",
+        "startAt": "2026-06-17T09:00:00-04:00",
+        "endAt": "2026-06-17T09:30:00-04:00"
+      }
+    ]
+  },
+  "error": null
 }
 ```
 
+Reglas implementadas:
+
+- Valida que tenant, sucursal y servicio esten `active` y pertenezcan entre si.
+- Valida que el servicio este activo en la sucursal mediante `catalog.branch_services`.
+- Genera slots cada `15` minutos usando `duration_minutes` del servicio.
+- Usa horarios base `active` de `catalog.resource_schedules` por dia de semana.
+- Solo usa recursos compatibles `active`; ignora recursos `inactive` y `blocked`.
+- Excluye slots que se solapan con reservas `CONFIRMED`.
+- Excluye slots que se solapan con bloqueos `ACTIVE`.
+- No devuelve slots pasados segun el timezone de la sucursal.
+
+Errores:
+
+- `400 VALIDATION_ERROR` si falta un query param o `date` no usa `yyyy-MM-dd`.
+- `404 TENANT_NOT_FOUND` si el tenant no existe o no esta activo.
+- `404 BRANCH_NOT_FOUND` si la sucursal no existe, no pertenece al tenant o no esta activa.
+- `404 SERVICE_NOT_FOUND` si el servicio no existe, no pertenece al tenant, no esta activo o no esta activo en la sucursal.
+
 ### POST /reservations
 
-Crea reserva confirmada.
+Crea reserva confirmada. Requiere JWT con rol `client`.
 
 Para un usuario `client`, `client_user_id` se toma de `user_id` en el JWT. El
 tenant no viene del JWT del cliente: Booking lo deriva de la sucursal y servicio
@@ -594,21 +886,51 @@ Request:
 }
 ```
 
+`resourceId` puede omitirse. En ese caso Booking elige el primer recurso activo,
+compatible y libre segun prioridad de `catalog.service_resources`.
+
 Response:
 
 ```json
 {
-  "reservationId": "uuid",
-  "status": "CONFIRMED",
-  "startAt": "2026-06-12T09:00:00-04:00",
-  "endAt": "2026-06-12T09:30:00-04:00"
+  "success": true,
+  "data": {
+    "reservationId": "uuid",
+    "tenantId": "uuid",
+    "branchId": "uuid",
+    "serviceId": "uuid",
+    "resourceId": "uuid",
+    "clientUserId": "uuid",
+    "status": "CONFIRMED",
+    "startAt": "2026-06-12T09:00:00-04:00",
+    "endAt": "2026-06-12T09:30:00-04:00",
+    "notes": "Quiero corte bajo",
+    "createdAt": "2026-06-16T12:00:00Z"
+  },
+  "error": null
 }
 ```
+
+Reglas implementadas:
+
+- Valida tenant, sucursal, servicio y recurso activo dentro de una transaccion.
+- Valida que el servicio este activo para la sucursal.
+- Valida horario base activo del recurso para la fecha y hora local de la sucursal.
+- Valida bloqueos `ACTIVE` y reservas `CONFIRMED` solapadas.
+- Inserta reserva con estado `CONFIRMED`.
+- Inserta historial `CREATED`.
+- Inserta evento outbox `ReservationCreated` con estado `PENDING` para Reporting.
+- PostgreSQL mantiene la defensa final con constraint de exclusion; si dos clientes
+  toman el mismo slot, la API responde `409 SLOT_ALREADY_TAKEN`.
 
 Errores posibles:
 
 - `409 SLOT_ALREADY_TAKEN`
 - `409 RESOURCE_BLOCKED`
+- `409 RESOURCE_NOT_AVAILABLE`
+- `404 BRANCH_NOT_FOUND`
+- `404 SERVICE_NOT_FOUND`
+- `404 RESOURCE_NOT_FOUND`
 - `400 VALIDATION_ERROR`
 
 ### PATCH /reservations/{reservationId}/cancel
@@ -895,6 +1217,14 @@ Estado: `IMPLEMENTADO`. Autenticacion: publica.
 curl -sS "$IDENTITY_URL/tenants/public" | jq
 ```
 
+#### GET /tenants/public/{slug}
+
+Estado: `IMPLEMENTADO`. Autenticacion: publica.
+
+```bash
+curl -sS "$IDENTITY_URL/tenants/public/$TENANT_SLUG" | jq
+```
+
 #### POST /users/admin
 
 Estado: `IMPLEMENTADO`. Autenticacion: `super_admin`. Requiere ejecutar antes
@@ -1151,63 +1481,248 @@ curl -i -X POST "$CATALOG_URL/branches/$BRANCH_ID/services/$SERVICE_ID" \
   -H "Authorization: Bearer $TENANT_ADMIN_TOKEN"
 ```
 
-#### POST /resources
+#### DELETE /branches/{branchId}/services/{serviceId}
 
-Estado: `PLANIFICADO`. Autenticacion esperada: `tenant_admin`.
+Estado: `PLANIFICADO` para HU-009. Autenticacion esperada: `tenant_admin`.
 
 ```bash
-curl -i -X POST "$CATALOG_URL/resources" \
+curl -i -X DELETE "$CATALOG_URL/branches/$BRANCH_ID/services/$SERVICE_ID" \
+  -H "Authorization: Bearer $TENANT_ADMIN_TOKEN"
+```
+
+#### GET /resources
+
+Estado: `IMPLEMENTADO`. Autenticacion: `tenant_admin`.
+
+```bash
+curl -sS "$CATALOG_URL/resources?branchId=$BRANCH_ID&status=active" \
+  -H "Authorization: Bearer $TENANT_ADMIN_TOKEN" | jq
+```
+
+#### GET /resources/{resourceId}
+
+Estado: `IMPLEMENTADO`. Autenticacion: `tenant_admin` del mismo tenant.
+
+```bash
+curl -sS "$CATALOG_URL/resources/$RESOURCE_ID" \
+  -H "Authorization: Bearer $TENANT_ADMIN_TOKEN" | jq
+```
+
+#### POST /resources
+
+Estado: `IMPLEMENTADO`. Autenticacion: `tenant_admin`. Guarda el ID creado para
+las pruebas siguientes.
+
+```bash
+export TEST_RESOURCE_RESPONSE="$(curl -sS -X POST "$CATALOG_URL/resources" \
   -H "Authorization: Bearer $TENANT_ADMIN_TOKEN" \
   -H 'Content-Type: application/json' \
-  -d "{\"branchId\":\"$BRANCH_ID\",\"name\":\"Silla Postman\",\"resourceType\":\"chair\",\"description\":\"Recurso creado desde curl\",\"capacity\":1,\"status\":\"active\"}"
+  -d "{\"branchId\":\"$BRANCH_ID\",\"name\":\"Silla Postman $RUN_ID\",\"resourceType\":\"silla\",\"description\":\"Recurso creado desde curl\",\"capacity\":1,\"status\":\"active\"}")"
+echo "$TEST_RESOURCE_RESPONSE" | jq
+export TEST_RESOURCE_ID="$(echo "$TEST_RESOURCE_RESPONSE" | jq -r '.data.resourceId')"
+```
+
+#### PUT /resources/{resourceId}
+
+Estado: `IMPLEMENTADO`. Autenticacion: `tenant_admin` del mismo tenant.
+
+```bash
+curl -sS -X PUT "$CATALOG_URL/resources/$TEST_RESOURCE_ID" \
+  -H "Authorization: Bearer $TENANT_ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d "{\"branchId\":\"$BRANCH_ID\",\"name\":\"Sala Postman Actualizada\",\"resourceType\":\"sala\",\"description\":\"Recurso editado desde curl\",\"capacity\":4,\"status\":\"blocked\"}" | jq
+```
+
+#### PATCH /resources/{resourceId}/status
+
+Estado: `IMPLEMENTADO`. Autenticacion: `tenant_admin` del mismo tenant.
+
+```bash
+curl -sS -X PATCH "$CATALOG_URL/resources/$TEST_RESOURCE_ID/status" \
+  -H "Authorization: Bearer $TENANT_ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"status":"inactive"}' | jq
+```
+
+#### DELETE /resources/{resourceId}
+
+Estado: `IMPLEMENTADO`. Autenticacion: `tenant_admin`. Realiza baja logica.
+
+```bash
+curl -sS -X DELETE "$CATALOG_URL/resources/$TEST_RESOURCE_ID" \
+  -H "Authorization: Bearer $TENANT_ADMIN_TOKEN" | jq
+```
+
+#### GET /services/{serviceId}/resources
+
+Estado: `IMPLEMENTADO`. Autenticacion: `tenant_admin`.
+
+```bash
+curl -sS "$CATALOG_URL/services/$SERVICE_ID/resources?status=active" \
+  -H "Authorization: Bearer $TENANT_ADMIN_TOKEN" | jq
+```
+
+#### GET /services/{serviceId}/compatible-resources
+
+Estado: `IMPLEMENTADO`. Autenticacion: `tenant_admin`. Devuelve solo recursos
+activos con asociacion activa.
+
+```bash
+curl -sS "$CATALOG_URL/services/$SERVICE_ID/compatible-resources?branchId=$BRANCH_ID" \
+  -H "Authorization: Bearer $TENANT_ADMIN_TOKEN" | jq
 ```
 
 #### POST /services/{serviceId}/resources/{resourceId}
 
-Estado: `PLANIFICADO`. Autenticacion esperada: `tenant_admin`.
+Estado: `IMPLEMENTADO`. Autenticacion: `tenant_admin`.
 
 ```bash
-curl -i -X POST "$CATALOG_URL/services/$SERVICE_ID/resources/$RESOURCE_ID" \
+curl -sS -X POST "$CATALOG_URL/services/$SERVICE_ID/resources/$RESOURCE_ID" \
+  -H "Authorization: Bearer $TENANT_ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"required":true,"priority":1,"status":"active"}' | jq
+```
+
+#### PUT /services/{serviceId}/resources/{resourceId}
+
+Estado: `IMPLEMENTADO`. Autenticacion: `tenant_admin`.
+
+```bash
+curl -sS -X PUT "$CATALOG_URL/services/$SERVICE_ID/resources/$RESOURCE_ID" \
+  -H "Authorization: Bearer $TENANT_ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"required":true,"priority":2,"status":"active"}' | jq
+```
+
+#### PATCH /services/{serviceId}/resources/{resourceId}/status
+
+Estado: `IMPLEMENTADO`. Autenticacion: `tenant_admin`.
+
+```bash
+curl -sS -X PATCH "$CATALOG_URL/services/$SERVICE_ID/resources/$RESOURCE_ID/status" \
+  -H "Authorization: Bearer $TENANT_ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"status":"inactive"}' | jq
+```
+
+#### DELETE /services/{serviceId}/resources/{resourceId}
+
+Estado: `IMPLEMENTADO`. Autenticacion: `tenant_admin`. Realiza baja logica de la
+compatibilidad y responde `204 No Content`.
+
+```bash
+curl -i -X DELETE "$CATALOG_URL/services/$SERVICE_ID/resources/$RESOURCE_ID" \
   -H "Authorization: Bearer $TENANT_ADMIN_TOKEN"
+```
+
+#### GET /resource-schedules
+
+Estado: `IMPLEMENTADO`. Autenticacion: `tenant_admin`.
+
+```bash
+curl -sS "$CATALOG_URL/resource-schedules?branchId=$BRANCH_ID&resourceId=$RESOURCE_ID&dayOfWeek=1&status=active" \
+  -H "Authorization: Bearer $TENANT_ADMIN_TOKEN" | jq
+```
+
+#### GET /resource-schedules/{scheduleId}
+
+Estado: `IMPLEMENTADO`. Autenticacion: `tenant_admin`.
+
+```bash
+curl -sS "$CATALOG_URL/resource-schedules/$TEST_SCHEDULE_ID" \
+  -H "Authorization: Bearer $TENANT_ADMIN_TOKEN" | jq
 ```
 
 #### POST /resource-schedules
 
-Estado: `PLANIFICADO`. Autenticacion esperada: `tenant_admin`.
+Estado: `IMPLEMENTADO`. Autenticacion: `tenant_admin`. Guarda el ID creado para
+las pruebas siguientes.
 
 ```bash
-curl -i -X POST "$CATALOG_URL/resource-schedules" \
+export TEST_SCHEDULE_RESPONSE="$(curl -sS -X POST "$CATALOG_URL/resource-schedules" \
   -H "Authorization: Bearer $TENANT_ADMIN_TOKEN" \
   -H 'Content-Type: application/json' \
-  -d "{\"branchId\":\"$BRANCH_ID\",\"resourceId\":\"$RESOURCE_ID\",\"dayOfWeek\":1,\"startTime\":\"09:00\",\"endTime\":\"18:00\",\"validFrom\":\"2026-06-15\",\"validTo\":null}"
+  -d "{\"branchId\":\"$BRANCH_ID\",\"resourceId\":\"$RESOURCE_ID\",\"dayOfWeek\":1,\"startTime\":\"09:00\",\"endTime\":\"18:00\",\"validFrom\":\"2026-06-16\",\"validTo\":null,\"status\":\"active\"}")"
+echo "$TEST_SCHEDULE_RESPONSE" | jq
+export TEST_SCHEDULE_ID="$(echo "$TEST_SCHEDULE_RESPONSE" | jq -r '.data.scheduleId')"
+```
+
+#### PUT /resource-schedules/{scheduleId}
+
+Estado: `IMPLEMENTADO`. Autenticacion: `tenant_admin`.
+
+```bash
+curl -sS -X PUT "$CATALOG_URL/resource-schedules/$TEST_SCHEDULE_ID" \
+  -H "Authorization: Bearer $TENANT_ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d "{\"branchId\":\"$BRANCH_ID\",\"resourceId\":\"$RESOURCE_ID\",\"dayOfWeek\":2,\"startTime\":\"10:00\",\"endTime\":\"16:30\",\"validFrom\":\"2026-06-16\",\"validTo\":\"2026-12-31\",\"status\":\"active\"}" | jq
+```
+
+#### PATCH /resource-schedules/{scheduleId}/status
+
+Estado: `IMPLEMENTADO`. Autenticacion: `tenant_admin`.
+
+```bash
+curl -sS -X PATCH "$CATALOG_URL/resource-schedules/$TEST_SCHEDULE_ID/status" \
+  -H "Authorization: Bearer $TENANT_ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"status":"inactive"}' | jq
+```
+
+#### DELETE /resource-schedules/{scheduleId}
+
+Estado: `IMPLEMENTADO`. Autenticacion: `tenant_admin`. Realiza baja logica.
+
+```bash
+curl -sS -X DELETE "$CATALOG_URL/resource-schedules/$TEST_SCHEDULE_ID" \
+  -H "Authorization: Bearer $TENANT_ADMIN_TOKEN" | jq
 ```
 
 ### Booking - comandos de contrato
 
-Todos los endpoints de esta seccion estan `PLANIFICADOS`; Booking actualmente
-solo expone `/` y `/health`. Los comandos quedan preparados para su implementacion.
-
 #### GET /availability
 
-Autenticacion esperada: publica.
+Estado: `IMPLEMENTADO` para HU-014. Autenticacion: publica. El ejemplo usa la
+data seed del entorno local; `2026-06-17` es miercoles y coincide con los horarios
+base seed de lunes a viernes.
 
 ```bash
-curl -i "$BOOKING_URL/availability?tenantSlug=$TENANT_SLUG&branchId=$BRANCH_ID&serviceId=$SERVICE_ID&date=$TEST_DATE"
+export TEST_DATE="2026-06-17"
+
+curl -sS "$BOOKING_URL/availability?tenantSlug=$TENANT_SLUG&branchId=$BRANCH_ID&serviceId=$SERVICE_ID&date=$TEST_DATE" | jq
+```
+
+Prueba de validacion:
+
+```bash
+curl -sS "$BOOKING_URL/availability?tenantSlug=$TENANT_SLUG&branchId=$BRANCH_ID&serviceId=$SERVICE_ID&date=17-06-2026" | jq
 ```
 
 #### POST /reservations
 
-Autenticacion esperada: `client`. `Idempotency-Key` debe ser unico por intento.
+Estado: `IMPLEMENTADO` para HU-015. Autenticacion: `client`. `Idempotency-Key`
+debe ser unico por intento; el endpoint ya crea reserva, historial y evento outbox
+en la misma transaccion.
 
 ```bash
-curl -i -X POST "$BOOKING_URL/reservations" \
+export TEST_RESERVATION_RESPONSE="$(curl -sS -X POST "$BOOKING_URL/reservations" \
   -H "Authorization: Bearer $CLIENT_TOKEN" \
   -H "Idempotency-Key: $(cat /proc/sys/kernel/random/uuid)" \
   -H 'Content-Type: application/json' \
-  -d "{\"branchId\":\"$BRANCH_ID\",\"serviceId\":\"$SERVICE_ID\",\"resourceId\":\"$RESOURCE_ID\",\"startAt\":\"2026-06-15T09:00:00-04:00\",\"notes\":\"Reserva de prueba desde curl\"}"
+  -d "{\"branchId\":\"$BRANCH_ID\",\"serviceId\":\"$SERVICE_ID\",\"resourceId\":\"$RESOURCE_ID\",\"startAt\":\"2026-06-17T09:00:00-04:00\",\"notes\":\"Reserva de prueba desde curl\"}")"
+echo "$TEST_RESERVATION_RESPONSE" | jq
+export RESERVATION_ID="$(echo "$TEST_RESERVATION_RESPONSE" | jq -r '.data.reservationId')"
 ```
 
-Al implementarse, guardar `data.reservationId` como `RESERVATION_ID`.
+Prueba de conflicto ejecutando la misma reserva por segunda vez:
+
+```bash
+curl -sS -X POST "$BOOKING_URL/reservations" \
+  -H "Authorization: Bearer $CLIENT_TOKEN" \
+  -H "Idempotency-Key: $(cat /proc/sys/kernel/random/uuid)" \
+  -H 'Content-Type: application/json' \
+  -d "{\"branchId\":\"$BRANCH_ID\",\"serviceId\":\"$SERVICE_ID\",\"resourceId\":\"$RESOURCE_ID\",\"startAt\":\"2026-06-17T09:00:00-04:00\",\"notes\":\"Reserva duplicada desde curl\"}" | jq
+```
 
 #### PATCH /reservations/{reservationId}/cancel
 
