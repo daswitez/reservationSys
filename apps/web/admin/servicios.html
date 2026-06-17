@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Servicios — ReservasSys</title>
+  <link rel="stylesheet" href="../css/main.css">
+</head>
+<body>
+<div class="app-shell">
+  <div id="sidebar-slot"></div>
+
+  <main class="main-content">
+    <div class="page-header">
+      <h1>✂️ Servicios</h1>
+      <button class="btn btn-primary" id="new-btn">+ Nuevo servicio</button>
+    </div>
+    <div class="card">
+      <div id="content" class="table-wrap"></div>
+    </div>
+  </main>
+</div>
+
+<script type="module">
+import { catalog } from '../js/api.js';
+import { requireAdmin } from '../js/auth.js';
+import { renderSidebar, toast, confirmModal, formModal, loadingHtml, emptyHtml, errorHtml } from '../js/components.js';
+import { badge, friendlyError, escHtml } from '../js/utils.js';
+
+requireAdmin();
+document.getElementById('sidebar-slot').appendChild(renderSidebar('servicios.html'));
+
+const content = document.getElementById('content');
+let branches = [];
+
+try {
+  const res = await catalog.getBranches();
+  branches = Array.isArray(res) ? res : (res?.items ?? []);
+} catch {}
+
+function serviceForm(s = {}) {
+  const branchOptions = branches.map(b =>
+    `<option value="${b.id}" ${(s.branchId ?? s.branch_id) === b.id ? 'selected' : ''}>${escHtml(b.name)}</option>`
+  ).join('');
+  return `
+    <div class="form-group"><label>Sucursal</label>
+      <select name="branchId" class="form-control" required>
+        <option value="">Seleccionar...</option>${branchOptions}
+      </select>
+    </div>
+    <div class="form-group"><label>Nombre</label><input name="name" class="form-control" value="${escHtml(s.name ?? '')}" required></div>
+    <div class="form-group"><label>Descripción</label><textarea name="description" class="form-control">${escHtml(s.description ?? '')}</textarea></div>
+    <div class="form-row">
+      <div class="form-group"><label>Duración (minutos)</label><input name="durationMinutes" type="number" class="form-control" min="1" value="${s.durationMinutes ?? 30}" required></div>
+      <div class="form-group"><label>Precio (opcional)</label><input name="price" type="number" class="form-control" step="0.01" min="0" value="${s.price ?? ''}"></div>
+    </div>
+    <div class="form-group">
+      <label>Estado</label>
+      <select name="status" class="form-control">
+        <option value="active"   ${s.status === 'active'   ? 'selected' : ''}>Activo</option>
+        <option value="inactive" ${s.status === 'inactive' ? 'selected' : ''}>Inactivo</option>
+      </select>
+    </div>`;
+}
+
+async function load() {
+  content.innerHTML = loadingHtml();
+  try {
+    const res  = await catalog.getServices();
+    const list = Array.isArray(res) ? res : (res?.items ?? []);
+    if (!list.length) { content.innerHTML = emptyHtml('No hay servicios'); return; }
+
+    content.innerHTML = `
+      <table>
+        <thead><tr><th>Nombre</th><th>Sucursal</th><th>Duración</th><th>Precio</th><th>Estado</th><th class="actions-col">Acciones</th></tr></thead>
+        <tbody>
+          ${list.map(s => `
+            <tr>
+              <td><strong>${escHtml(s.name)}</strong>${s.description ? `<br><small class="text-muted">${escHtml(s.description)}</small>` : ''}</td>
+              <td>${escHtml(s.branchName ?? branches.find(b => b.id === s.branchId)?.name ?? '—')}</td>
+              <td>${s.durationMinutes ?? '—'} min</td>
+              <td>${s.price ? `$${s.price}` : '—'}</td>
+              <td>${badge(s.status ?? 'active')}</td>
+              <td class="actions-col">
+                <button class="btn btn-secondary btn-sm" data-edit="${s.id}">Editar</button>
+                <button class="btn btn-danger btn-sm"    data-del="${s.id}">Eliminar</button>
+              </td>
+            </tr>`).join('')}
+        </tbody>
+      </table>`;
+
+    content.querySelectorAll('[data-edit]').forEach(btn => {
+      const svc = list.find(s => s.id === btn.dataset.edit);
+      btn.addEventListener('click', async () => {
+        const data = await formModal('Editar servicio', serviceForm(svc), 'Guardar cambios');
+        if (!data || !data.name) return;
+        if (data.durationMinutes) data.durationMinutes = +data.durationMinutes;
+        if (data.price) data.price = +data.price; else delete data.price;
+        try {
+          await catalog.updateService(svc.id, data);
+          toast('Servicio actualizado.', 'success');
+          load();
+        } catch (err) { toast(friendlyError(err), 'error'); }
+      });
+    });
+
+    content.querySelectorAll('[data-del]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        if (!await confirmModal('¿Eliminar este servicio?', 'Eliminar')) return;
+        try {
+          await catalog.deleteService(btn.dataset.del);
+          toast('Servicio eliminado.', 'success');
+          load();
+        } catch (err) { toast(friendlyError(err), 'error'); }
+      });
+    });
+  } catch (err) {
+    content.innerHTML = errorHtml(friendlyError(err));
+  }
+}
+
+document.getElementById('new-btn').addEventListener('click', async () => {
+  const data = await formModal('Nuevo servicio', serviceForm(), 'Crear');
+  if (!data || !data.name) return;
+  if (data.durationMinutes) data.durationMinutes = +data.durationMinutes;
+  if (data.price) data.price = +data.price; else delete data.price;
+  try {
+    await catalog.createService(data);
+    toast('Servicio creado.', 'success');
+    load();
+  } catch (err) { toast(friendlyError(err), 'error'); }
+});
+
+load();
+</script>
+</body>
+</html>

@@ -59,11 +59,30 @@ apps/web/
 ## Variables de entorno
 
 ```txt
-NEXT_PUBLIC_IDENTITY_API_URL=http://localhost:5101
-NEXT_PUBLIC_CATALOG_API_URL=http://localhost:5102
-NEXT_PUBLIC_BOOKING_API_URL=http://localhost:5103
-NEXT_PUBLIC_REPORTING_API_URL=http://localhost:5104
+NEXT_PUBLIC_IDENTITY_URL=http://localhost:5201
+NEXT_PUBLIC_CATALOG_URL=http://localhost:5202
+NEXT_PUBLIC_BOOKING_URL=http://localhost:5203
+NEXT_PUBLIC_REPORTING_URL=http://localhost:5204
 ```
+
+Swagger/OpenAPI local:
+
+- Identity: `http://localhost:5201/swagger`
+- Catalog: `http://localhost:5202/swagger`
+- Booking: `http://localhost:5203/swagger`
+- Reporting: `http://localhost:5204/swagger`
+
+El contrato completo de endpoints y ejemplos curl vive en
+`reservas_mvp_docs/05_API_CONTRATOS_DOTNET.md`.
+
+## Fechas y horas
+
+- El frontend debe enviar `startAt`/`endAt` como ISO-8601 con offset explícito.
+- Disponibilidad, reserva creada, detalle de reserva y agenda administrativa
+  devuelven `startAt`/`endAt` en timezone de la sucursal.
+- `GET /admin/reservations` y `resource-blocks` devuelven horarios en UTC.
+- Para mostrar horas en UI, formatear el ISO recibido. Para formularios
+  `datetime-local`, convertir usando el timezone de la sucursal seleccionada.
 
 ## Rutas públicas
 
@@ -146,9 +165,11 @@ Acciones:
 
 Consume:
 
-- `GET Booking /my-reservations`
+- `GET Booking /reservations/{reservationId}`
 - `PATCH Booking /reservations/{reservationId}/cancel`
 
+El backend no tiene `GET /reservations/my`. Para el MVP, guardar los
+`reservationId` creados en estado/localStorage y consultar cada detalle por ID.
 No mostrar políticas de cancelación porque no existen en el MVP.
 
 ## Panel administrativo
@@ -208,6 +229,12 @@ Acciones:
 
 Consume Booking Service.
 
+Notas de autorización:
+
+- `tenant_admin` puede operar reservas/bloqueos de su tenant.
+- `branch_admin` solo puede operar reservas/bloqueos de su `branch_id`.
+- `client` no puede entrar a agenda ni bloqueos administrativos.
+
 ### /admin/bloqueos
 
 Pantalla para crear y administrar bloqueos manuales.
@@ -246,6 +273,9 @@ Consume:
 Mensaje si el reporte está retrasado:
 
 > Los reportes pueden tardar unos segundos en actualizarse.
+
+Reporting ya recibe eventos desde el worker outbox de Booking. Aun así, la UI
+debe manejar `dataStatus: "PENDING_SYNC"` porque la sincronización es eventual.
 
 ## Estados de UI
 

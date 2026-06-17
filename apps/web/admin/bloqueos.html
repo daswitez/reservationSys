@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Bloqueos — ReservasSys</title>
+  <link rel="stylesheet" href="../css/main.css">
+</head>
+<body>
+<div class="app-shell">
+  <div id="sidebar-slot"></div>
+
+  <main class="main-content">
+    <div class="page-header">
+      <h1>🚫 Bloqueos de recursos</h1>
+      <button class="btn btn-primary" id="new-btn">+ Nuevo bloqueo</button>
+    </div>
+
+    <div class="filter-bar">
+      <div class="form-group">
+        <label>Sucursal</label>
+        <select id="filter-branch" class="form-control" style="min-width:200px">
+          <option value="">Todas</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Recurso</label>
+        <select id="filter-resource" class="form-control" style="min-width:180px">
+          <option value="">Todos</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Desde</label>
+        <input type="date" id="filter-from" class="form-control">
+      </div>
+      <div class="form-group">
+        <label>Hasta</label>
+        <input type="date" id="filter-to" class="form-control">
+      </div>
+      <button class="btn btn-primary" id="search-btn">Buscar</button>
+    </div>
+
+    <div class="card">
+      <div id="content" class="table-wrap"></div>
+    </div>
+  </main>
+</div>
+
+<script type="module">
+import { booking, catalog } from '../js/api.js';
+import { requireAdmin, getBranchId } from '../js/auth.js';
+import { renderSidebar, toast, confirmModal, formModal, loadingHtml, emptyHtml, errorHtml } from '../js/components.js';
+import { badge, formatDateTime, friendlyError, escHtml, today } from '../js/utils.js';
+
+requireAdmin();
+document.getElementById('sidebar-slot').appendChild(renderSidebar('bloqueos.html'));
+
+const filterBranch   = document.getElementById('filter-branch');
+const filterResource = document.getElementById('filter-resource');
+const filterFrom     = document.getElementById('filter-from');
+const filterTo       = document.getElementById('filter-to');
+const content        = document.getElementById('content');
+
+filterFrom.value = today();
+
+let branches  = [];
+let resources = [];
+
+try {
+  const res = await catalog.getBranches();
+  branches = Array.isArray(res) ? res : (res?.items ?? []);
+  branches.forEach(b => {
+    const o = document.createElement('option');
+    o.value = b.id; o.textContent = b.name;
+    filterBranch.appendChild(o);
+  });
+  const myBranch = getBranchId();
+  if (myBranch) { filterBranch.value = myBranch; await loadFilterResources(); }
+} catch {}
+
+async function loadFilterResources() {
+  filterResource.innerHTML = '<option value="">Todos</option>';
+  if (!filterBranch.value) return;
+  try {
+    const res = await catalog.getResources({ branchId: filterBranch.value });
+    resources = Array.isArray(res) ? res : (res?.items ?? []);
+    resources.forEach(r => {
+      const o = document.createElement('option');
+      o.value = r.id; o.textContent = r.name;
+      filterResource.appendChild(o);
+    });
+  } catch {}
+}
+filterBranch.addEventListener('change', loadFilterResources);
+
+async function load() {
+  content.innerHTML = loadingHtml();
+  try {
+    const params = {
+      branchId:   filterBranch.value   || undefined,
+      resourceId: filterResource.value || undefined,
+      from:       filterFrom.value     || undefined,
+      to:         filterTo.value       || undefined,
+    };
+    const res  = await booking.getBlocks(params);
+    const list = Array.isArray(res) ? res : (res?.items ?? []);
+    if (!list.length) { content.innerHTML = emptyHtml('No hay bloqueos'); return; }
+
+    content.innerHTML = `
+      <table>
+        <thead><tr><th>Recurso</th><th>Desde</th><th>Hasta</th><th>Motivo</th><th>Estado</th><th class="actions-col">Acciones</th></tr></thead>
+        <tbody>
+          ${list.map(b => `
+            <tr>
+              <td><strong>${escHtml(b.resourceName ?? '—')}</strong></td>
+              <td>${formatDateTime(b.startAt)}</td>
+              <td>${formatDateTime(b.endAt)}</td>
+              <td>${escHtml(b.reason ?? '—')}</td>
+              <td>${badge(b.status ?? 'active')}</td>
+              <td class="actions-col">
+                ${b.status !== 'cancelled' ? `<button class="btn btn-danger btn-sm" data-cancel="${b.id}">Cancelar</button>` : '—'}
+              </td>
+            </tr>`).join('')}
+        </tbody>
+      </table>`;
+
+    content.querySelectorAll('[data-cancel]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        if (!await confirmModal('¿Cancelar este bloqueo?', 'Confirmar')) return;
+        try {
+          await booking.cancelBlock(btn.dataset.cancel);
+          toast('Bloqueo cancelado.', 'success');
+          load();
+        } catch (err) { toast(friendlyError(err), 'error'); }
+      });
+    });
+  } catch (err) {
+    content.innerHTML = errorHtml(friendlyError(err));
+  }
+}
+
+document.getElementById('search-btn').addEventListener('click', load);
+
+document.getElementById('new-btn').addEventListener('click', async () => {
+  // Build resource options from current filter or all
+  let resOptions = '<option value="">Seleccionar recurso...</option>';
+  try {
+    const params = filterBranch.value ? { branchId: filterBranch.value } : {};
+    const res = await catalog.getResources(params);
+    const list = Array.isArray(res) ? res : (res?.items ?? []);
+    resOptions += list.map(r => `<option value="${r.id}">${escHtml(r.name)}</option>`).join('');
+  } catch {}
+
+  const branchOptions = branches.map(b =>
+    `<option value="${b.id}" ${filterBranch.value === b.id ? 'selected' : ''}>${escHtml(b.name)}</option>`
+  ).join('');
+
+  const data = await formModal('Nuevo bloqueo', `
+    <div class="alert alert-info" style="margin-bottom:1rem">Bloquea un recurso para un rango de tiempo. Las reservas existentes en ese período no se cancelan automáticamente.</div>
+    <div class="form-group"><label>Recurso</label>
+      <select name="resourceId" class="form-control" required>${resOptions}</select>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label>Desde</label><input name="startAt" type="datetime-local" class="form-control" required></div>
+      <div class="form-group"><label>Hasta</label><input name="endAt" type="datetime-local" class="form-control" required></div>
+    </div>
+    <div class="form-group"><label>Motivo</label><input name="reason" type="text" class="form-control" placeholder="Ej: Mantenimiento, vacaciones..."></div>
+    `, 'Crear bloqueo');
+
+  if (!data || !data.resourceId || !data.startAt || !data.endAt) return;
+  try {
+    await booking.createBlock({
+      resourceId: data.resourceId,
+      startAt:    new Date(data.startAt).toISOString(),
+      endAt:      new Date(data.endAt).toISOString(),
+      reason:     data.reason || undefined,
+    });
+    toast('Bloqueo creado.', 'success');
+    load();
+  } catch (err) { toast(friendlyError(err), 'error'); }
+});
+
+load();
+</script>
+</body>
+</html>

@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sucursales — ReservasSys</title>
+  <link rel="stylesheet" href="../css/main.css">
+</head>
+<body>
+<div class="app-shell">
+  <div id="sidebar-slot"></div>
+
+  <main class="main-content">
+    <div class="page-header">
+      <h1>🏢 Sucursales</h1>
+      <button class="btn btn-primary" id="new-btn">+ Nueva sucursal</button>
+    </div>
+    <div class="card">
+      <div id="content" class="table-wrap"></div>
+    </div>
+  </main>
+</div>
+
+<script type="module">
+import { catalog } from '../js/api.js';
+import { requireAdmin } from '../js/auth.js';
+import { renderSidebar, toast, confirmModal, formModal, loadingHtml, emptyHtml, errorHtml } from '../js/components.js';
+import { badge, friendlyError, escHtml } from '../js/utils.js';
+
+requireAdmin();
+document.getElementById('sidebar-slot').appendChild(renderSidebar('sucursales.html'));
+
+const content = document.getElementById('content');
+
+function branchForm(b = {}) {
+  return `
+    <div class="form-group"><label>Nombre</label><input name="name" class="form-control" value="${escHtml(b.name ?? '')}" required></div>
+    <div class="form-group"><label>Dirección</label><input name="address" class="form-control" value="${escHtml(b.address ?? '')}"></div>
+    <div class="form-group"><label>Teléfono</label><input name="phone" class="form-control" value="${escHtml(b.phone ?? '')}"></div>
+    <div class="form-group"><label>Timezone</label><input name="timezone" class="form-control" value="${escHtml(b.timezone ?? 'America/Argentina/Buenos_Aires')}" placeholder="America/Argentina/Buenos_Aires"></div>
+    <div class="form-group">
+      <label>Estado</label>
+      <select name="status" class="form-control">
+        <option value="active"   ${b.status === 'active'   ? 'selected' : ''}>Activo</option>
+        <option value="inactive" ${b.status === 'inactive' ? 'selected' : ''}>Inactivo</option>
+      </select>
+    </div>`;
+}
+
+async function load() {
+  content.innerHTML = loadingHtml();
+  try {
+    const res  = await catalog.getBranches();
+    const list = Array.isArray(res) ? res : (res?.items ?? []);
+    if (!list.length) { content.innerHTML = emptyHtml('No hay sucursales'); return; }
+
+    content.innerHTML = `
+      <table>
+        <thead><tr><th>Nombre</th><th>Dirección</th><th>Teléfono</th><th>Timezone</th><th>Estado</th><th class="actions-col">Acciones</th></tr></thead>
+        <tbody>
+          ${list.map(b => `
+            <tr>
+              <td><strong>${escHtml(b.name)}</strong></td>
+              <td>${escHtml(b.address ?? '—')}</td>
+              <td>${escHtml(b.phone ?? '—')}</td>
+              <td><code style="font-size:.8rem">${escHtml(b.timezone ?? '—')}</code></td>
+              <td>${badge(b.status ?? 'active')}</td>
+              <td class="actions-col">
+                <button class="btn btn-secondary btn-sm" data-edit="${b.id}">Editar</button>
+                <button class="btn btn-danger btn-sm"    data-del="${b.id}">Eliminar</button>
+              </td>
+            </tr>`).join('')}
+        </tbody>
+      </table>`;
+
+    content.querySelectorAll('[data-edit]').forEach(btn => {
+      const branch = list.find(b => b.id === btn.dataset.edit);
+      btn.addEventListener('click', async () => {
+        const data = await formModal('Editar sucursal', branchForm(branch), 'Guardar cambios');
+        if (!data || !data.name) return;
+        try {
+          await catalog.updateBranch(branch.id, data);
+          toast('Sucursal actualizada.', 'success');
+          load();
+        } catch (err) { toast(friendlyError(err), 'error'); }
+      });
+    });
+
+    content.querySelectorAll('[data-del]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        if (!await confirmModal('¿Eliminar esta sucursal?', 'Eliminar')) return;
+        try {
+          await catalog.deleteBranch(btn.dataset.del);
+          toast('Sucursal eliminada.', 'success');
+          load();
+        } catch (err) { toast(friendlyError(err), 'error'); }
+      });
+    });
+  } catch (err) {
+    content.innerHTML = errorHtml(friendlyError(err));
+  }
+}
+
+document.getElementById('new-btn').addEventListener('click', async () => {
+  const data = await formModal('Nueva sucursal', branchForm(), 'Crear');
+  if (!data || !data.name) return;
+  try {
+    await catalog.createBranch(data);
+    toast('Sucursal creada.', 'success');
+    load();
+  } catch (err) { toast(friendlyError(err), 'error'); }
+});
+
+load();
+</script>
+</body>
+</html>

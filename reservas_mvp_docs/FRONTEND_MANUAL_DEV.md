@@ -44,6 +44,7 @@ npm install \
   zod \
   zustand \
   date-fns \
+  date-fns-tz \
   lucide-react
 
 # shadcn/ui — instalar componentes uno a uno según se necesiten
@@ -73,6 +74,16 @@ NEXT_PUBLIC_REPORTING_URL=http://localhost:5204
 > `NEXT_PUBLIC_` hace que las variables sean visibles en el browser. Si en el futuro
 > se agregan llamadas desde Server Components o Route Handlers, crear las mismas
 > variables sin el prefijo para uso exclusivo de servidor.
+
+Swagger/OpenAPI local para revisar payloads desde el navegador:
+
+- Identity: `http://localhost:5201/swagger`
+- Catalog: `http://localhost:5202/swagger`
+- Booking: `http://localhost:5203/swagger`
+- Reporting: `http://localhost:5204/swagger`
+
+El contrato operativo completo, con ejemplos curl para Postman, está en
+`reservas_mvp_docs/05_API_CONTRATOS_DOTNET.md`.
 
 ---
 
@@ -258,15 +269,21 @@ export interface Resource {
   branchId: string;
   name: string;
   resourceType: string;
+  description: string | null;
+  capacity: number;
   status: 'active' | 'inactive' | 'blocked';
 }
 
 export interface ResourceSchedule {
   scheduleId: string;
+  tenantId: string;
+  branchId: string;
   resourceId: string;
-  dayOfWeek: number;        // 0 = lunes … 6 = domingo
+  dayOfWeek: number;        // ISO: 1 = lunes … 7 = domingo
   startTime: string;        // "HH:mm:ss"
   endTime: string;
+  validFrom: string | null;
+  validTo: string | null;
   status: 'active' | 'inactive';
 }
 ```
@@ -361,6 +378,18 @@ export interface AgendaResponse {
   blocks: AgendaBlockItem[];
 }
 ```
+
+### Criterio frontend para fechas y horas
+
+- `AvailabilitySlot.startAt/endAt`, `Reservation.startAt/endAt` y
+  `AgendaResponse.*.startAt/endAt` llegan en timezone de la sucursal.
+- `ReservationSearchItem.startAt/endAt` llega en UTC porque
+  `GET /admin/reservations` es una vista administrativa de búsqueda.
+- `ResourceBlock.startAt/endAt` llega en UTC en `POST /resource-blocks`,
+  `GET /resource-blocks/{blockId}` y `PATCH /resource-blocks/{blockId}/cancel`.
+- Para UI de agenda y reserva, formatear el ISO recibido directamente.
+- Para crear reservas o bloqueos desde `<input type="datetime-local">`, convertir
+  el valor local al timezone de la sucursal antes de enviarlo.
 
 ### `src/types/reporting.ts`
 
@@ -710,14 +739,16 @@ export const bookingApi = {
   createBlock: (
     token: string,
     data: {
-      branchId: string; resourceId: string;
-      startAt: string; endAt: string;
+      resourceId: string; startAt: string; endAt: string;
       reason?: string; blockType: string;
     },
   ) =>
     apiFetch<ResourceBlock>(`${BASE}/resource-blocks`, {
       method: 'POST', token, body: JSON.stringify(data),
     }),
+
+  getBlock: (token: string, blockId: string) =>
+    apiFetch<ResourceBlock>(`${BASE}/resource-blocks/${blockId}`, { token }),
 
   cancelBlock: (token: string, blockId: string) =>
     apiFetch<ResourceBlock>(
@@ -1455,6 +1486,9 @@ export default function MisReservasPage() {
 
 **Acceso:** `tenant_admin`, `branch_admin`  
 **Es la pantalla más importante del panel admin.**
+`GET /admin/agenda` devuelve reservas y bloqueos en timezone de la sucursal, por
+lo que `format(new Date(item.startAt), 'HH:mm')` muestra la hora operativa correcta
+para la agenda.
 
 ```tsx
 'use client';
@@ -1672,7 +1706,13 @@ function AgendaBlockRow({
 **Acceso:** `tenant_admin`, `branch_admin`  
 **API:** `GET /admin/reservations` con filtros
 
-Mostrar tabla con columnas: Fecha/hora, Sucursal, Servicio, Recurso, Cliente, Estado, Historial (expandible). Filtros en la parte superior: `dateFrom`, `dateTo`, `status`, `clientUserId`.
+Mostrar tabla con columnas: Fecha/hora, Sucursal, Servicio, Recurso, Cliente,
+Estado, Historial (expandible). Filtros en la parte superior: `dateFrom`,
+`dateTo`, `status`, `clientUserId`.
+
+`GET /admin/reservations` devuelve `startAt/endAt` en UTC. Para mostrarlo como
+hora operativa, convertir usando el timezone de la sucursal si la pantalla lo
+tiene disponible; si no, etiquetar la columna como UTC.
 
 ```tsx
 // Hook TanStack Query reutilizable
@@ -1759,7 +1799,9 @@ Extra: incluir sección para **vincular servicio a sucursal** con `POST /branche
 const resourceSchema = z.object({
   branchId: z.string().uuid('Seleccioná una sucursal'),
   name: z.string().min(1),
-  resourceType: z.string().min(1),  // ej: "seat", "professional", "room"
+  resourceType: z.string().min(1),  // ej: "silla", "profesional", "sala", "equipo"
+  description: z.string().nullable().optional(),
+  capacity: z.number().int().min(1),
   status: z.enum(['active', 'inactive', 'blocked']),
 });
 ```
@@ -1787,7 +1829,7 @@ Martes      09:00    18:00     active   [Desactivar]
 ```ts
 const scheduleSchema = z.object({
   resourceId: z.string().uuid(),
-  dayOfWeek: z.number().int().min(0).max(6),
+  dayOfWeek: z.number().int().min(1).max(7),
   startTime: z.string().regex(/^\d{2}:\d{2}$/),
   endTime: z.string().regex(/^\d{2}:\d{2}$/),
 }).refine((d) => d.startTime < d.endTime, {
@@ -1796,20 +1838,21 @@ const scheduleSchema = z.object({
 });
 ```
 
-Los días de semana en el backend son: 0=Lunes, 1=Martes, …, 6=Domingo.
+Los días de semana en el backend usan ISO: 1=Lunes, 2=Martes, …, 7=Domingo.
 
 ---
 
 ### 9.12 `/admin/bloqueos`
 
 **Acceso:** `tenant_admin`, `branch_admin`  
-**APIs:** `POST /resource-blocks`, `PATCH /resource-blocks/{id}/cancel`
+**APIs:** `POST /resource-blocks`, `GET /resource-blocks/{id}`,
+`PATCH /resource-blocks/{id}/cancel`
 
 **Schema Zod:**
 
 ```ts
 const blockSchema = z.object({
-  branchId: z.string().uuid(),
+  branchId: z.string().uuid(), // solo UI: filtra recursos; no se envia a POST /resource-blocks
   resourceId: z.string().uuid(),
   startAt: z.string().min(1, 'Fecha/hora inicio requerida'),
   endAt: z.string().min(1, 'Fecha/hora fin requerida'),
@@ -1822,16 +1865,19 @@ const blockSchema = z.object({
 ```
 
 Los `startAt`/`endAt` se envían como ISO 8601 con timezone de la sucursal.
+La respuesta de `resource-blocks` vuelve en UTC; para la agenda usar
+`GET /admin/agenda`, que ya devuelve los bloqueos en timezone de sucursal.
 Usar `<input type="datetime-local">` y convertir con date-fns:
 
 ```ts
-import { formatISO, parseISO } from 'date-fns';
-import { toZonedTime, fromZonedTime } from 'date-fns-tz';
+import { parseISO } from 'date-fns';
+import { formatInTimeZone, fromZonedTime } from 'date-fns-tz';
 
 // Convertir datetime-local a ISO con timezone de la sucursal
 function toLocalISO(datetimeLocal: string, tz: string): string {
-  const date = parseISO(datetimeLocal);
-  return fromZonedTime(date, tz).toISOString();
+  const wallClockDate = parseISO(datetimeLocal);
+  const utcInstant = fromZonedTime(wallClockDate, tz);
+  return formatInTimeZone(utcInstant, tz, "yyyy-MM-dd'T'HH:mm:ssXXX");
 }
 ```
 
@@ -2245,7 +2291,8 @@ GET /reservations/my
 → ordenado por startAt DESC
 ```
 
-**Reporting necesita datos en Cassandra.** Los endpoints de reporte retornan
-`dataStatus: "PENDING_SYNC"` si el worker outbox de Booking aún no procesó los
-eventos. Mientras el worker no esté implementado, los reportes mostrarán conteos en 0.
-La UI ya maneja este caso con el mensaje de advertencia.
+**Reporting es eventualmente consistente.** Booking publica eventos mediante outbox
+y el worker los sincroniza hacia Reporting/Cassandra. Los endpoints de reporte
+pueden retornar `dataStatus: "PENDING_SYNC"` durante algunos segundos si el evento
+aún no fue procesado. La UI debe mantener el mensaje de advertencia y permitir
+refrescar.

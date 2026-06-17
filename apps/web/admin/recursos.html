@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Recursos — ReservasSys</title>
+  <link rel="stylesheet" href="../css/main.css">
+</head>
+<body>
+<div class="app-shell">
+  <div id="sidebar-slot"></div>
+
+  <main class="main-content">
+    <div class="page-header">
+      <h1>🪑 Recursos</h1>
+      <button class="btn btn-primary" id="new-btn">+ Nuevo recurso</button>
+    </div>
+
+    <div class="filter-bar">
+      <div class="form-group">
+        <label>Filtrar por sucursal</label>
+        <select id="filter-branch" class="form-control" style="min-width:200px">
+          <option value="">Todas</option>
+        </select>
+      </div>
+      <button class="btn btn-secondary" id="filter-btn">Filtrar</button>
+    </div>
+
+    <div class="card">
+      <div id="content" class="table-wrap"></div>
+    </div>
+  </main>
+</div>
+
+<script type="module">
+import { catalog } from '../js/api.js';
+import { requireAdmin, getBranchId } from '../js/auth.js';
+import { renderSidebar, toast, confirmModal, formModal, loadingHtml, emptyHtml, errorHtml } from '../js/components.js';
+import { badge, friendlyError, escHtml } from '../js/utils.js';
+
+requireAdmin();
+document.getElementById('sidebar-slot').appendChild(renderSidebar('recursos.html'));
+
+const content      = document.getElementById('content');
+const filterBranch = document.getElementById('filter-branch');
+let branches = [];
+
+try {
+  const res = await catalog.getBranches();
+  branches = Array.isArray(res) ? res : (res?.items ?? []);
+  branches.forEach(b => {
+    const o = document.createElement('option');
+    o.value = b.id; o.textContent = b.name;
+    filterBranch.appendChild(o);
+  });
+  const myBranch = getBranchId();
+  if (myBranch) filterBranch.value = myBranch;
+} catch {}
+
+function resourceForm(r = {}) {
+  const branchOptions = branches.map(b =>
+    `<option value="${b.id}" ${r.branchId === b.id ? 'selected' : ''}>${escHtml(b.name)}</option>`
+  ).join('');
+  return `
+    <div class="form-group"><label>Sucursal</label>
+      <select name="branchId" class="form-control" required>
+        <option value="">Seleccionar...</option>${branchOptions}
+      </select>
+    </div>
+    <div class="form-group"><label>Nombre</label><input name="name" class="form-control" value="${escHtml(r.name ?? '')}" required></div>
+    <div class="form-group"><label>Descripción</label><input name="description" class="form-control" value="${escHtml(r.description ?? '')}"></div>
+    <div class="form-group">
+      <label>Estado</label>
+      <select name="status" class="form-control">
+        <option value="active"   ${r.status === 'active'   ? 'selected' : ''}>Activo</option>
+        <option value="blocked"  ${r.status === 'blocked'  ? 'selected' : ''}>Bloqueado</option>
+        <option value="inactive" ${r.status === 'inactive' ? 'selected' : ''}>Inactivo</option>
+      </select>
+    </div>`;
+}
+
+async function load() {
+  content.innerHTML = loadingHtml();
+  try {
+    const params = filterBranch.value ? { branchId: filterBranch.value } : {};
+    const res    = await catalog.getResources(params);
+    const list   = Array.isArray(res) ? res : (res?.items ?? []);
+    if (!list.length) { content.innerHTML = emptyHtml('No hay recursos'); return; }
+
+    content.innerHTML = `
+      <table>
+        <thead><tr><th>Nombre</th><th>Sucursal</th><th>Descripción</th><th>Estado</th><th class="actions-col">Acciones</th></tr></thead>
+        <tbody>
+          ${list.map(r => `
+            <tr>
+              <td><strong>${escHtml(r.name)}</strong></td>
+              <td>${escHtml(branches.find(b => b.id === r.branchId)?.name ?? r.branchName ?? '—')}</td>
+              <td>${escHtml(r.description ?? '—')}</td>
+              <td>${badge(r.status ?? 'active')}</td>
+              <td class="actions-col">
+                <button class="btn btn-secondary btn-sm" data-edit="${r.id}">Editar</button>
+                <button class="btn btn-danger btn-sm"    data-del="${r.id}">Eliminar</button>
+              </td>
+            </tr>`).join('')}
+        </tbody>
+      </table>`;
+
+    content.querySelectorAll('[data-edit]').forEach(btn => {
+      const resource = list.find(r => r.id === btn.dataset.edit);
+      btn.addEventListener('click', async () => {
+        const data = await formModal('Editar recurso', resourceForm(resource), 'Guardar cambios');
+        if (!data || !data.name) return;
+        try {
+          await catalog.updateResource(resource.id, data);
+          toast('Recurso actualizado.', 'success');
+          load();
+        } catch (err) { toast(friendlyError(err), 'error'); }
+      });
+    });
+
+    content.querySelectorAll('[data-del]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        if (!await confirmModal('¿Eliminar este recurso?', 'Eliminar')) return;
+        try {
+          await catalog.deleteResource(btn.dataset.del);
+          toast('Recurso eliminado.', 'success');
+          load();
+        } catch (err) { toast(friendlyError(err), 'error'); }
+      });
+    });
+  } catch (err) {
+    content.innerHTML = errorHtml(friendlyError(err));
+  }
+}
+
+document.getElementById('filter-btn').addEventListener('click', load);
+document.getElementById('new-btn').addEventListener('click', async () => {
+  const data = await formModal('Nuevo recurso', resourceForm(), 'Crear');
+  if (!data || !data.name) return;
+  try {
+    await catalog.createResource(data);
+    toast('Recurso creado.', 'success');
+    load();
+  } catch (err) { toast(friendlyError(err), 'error'); }
+});
+
+load();
+</script>
+</body>
+</html>

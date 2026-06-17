@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Reportes — ReservasSys</title>
+  <link rel="stylesheet" href="../css/main.css">
+</head>
+<body>
+<div class="app-shell">
+  <div id="sidebar-slot"></div>
+
+  <main class="main-content">
+    <div class="page-header">
+      <h1>📊 Reportes</h1>
+    </div>
+
+    <div id="pending-sync" class="alert alert-warning" style="display:none">
+      ⏳ Los reportes pueden tardar unos segundos en actualizarse.
+    </div>
+
+    <div class="tabs" id="tabs">
+      <button class="tab-btn active" data-tab="summary">Resumen diario</button>
+      <button class="tab-btn"        data-tab="services">Top servicios</button>
+      <button class="tab-btn"        data-tab="occupancy">Ocupación</button>
+      <button class="tab-btn"        data-tab="peak">Horas pico</button>
+    </div>
+
+    <!-- TAB: Resumen diario -->
+    <div class="tab-panel active" id="tab-summary">
+      <div class="filter-bar">
+        <div class="form-group">
+          <label>Fecha</label>
+          <input type="date" id="sum-date" class="form-control">
+        </div>
+        <div class="form-group">
+          <label>Sucursal</label>
+          <select id="sum-branch" class="form-control" style="min-width:180px">
+            <option value="">Todas</option>
+          </select>
+        </div>
+        <button class="btn btn-primary" id="sum-btn">Cargar</button>
+      </div>
+      <div id="sum-content"></div>
+    </div>
+
+    <!-- TAB: Top servicios -->
+    <div class="tab-panel" id="tab-services">
+      <div class="filter-bar">
+        <div class="form-group">
+          <label>Mes desde (YYYY-MM)</label>
+          <input type="month" id="svc-from" class="form-control">
+        </div>
+        <div class="form-group">
+          <label>Mes hasta</label>
+          <input type="month" id="svc-to" class="form-control">
+        </div>
+        <div class="form-group">
+          <label>Sucursal</label>
+          <select id="svc-branch" class="form-control" style="min-width:180px">
+            <option value="">Todas</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Límite</label>
+          <input type="number" id="svc-limit" class="form-control" value="10" min="1" max="50" style="width:80px">
+        </div>
+        <button class="btn btn-primary" id="svc-btn">Cargar</button>
+      </div>
+      <div id="svc-content"></div>
+    </div>
+
+    <!-- TAB: Ocupación -->
+    <div class="tab-panel" id="tab-occupancy">
+      <div class="filter-bar">
+        <div class="form-group">
+          <label>Sucursal</label>
+          <select id="occ-branch" class="form-control" style="min-width:180px">
+            <option value="">Todas</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Mes desde</label>
+          <input type="month" id="occ-from" class="form-control">
+        </div>
+        <div class="form-group">
+          <label>Mes hasta</label>
+          <input type="month" id="occ-to" class="form-control">
+        </div>
+        <button class="btn btn-primary" id="occ-btn">Cargar</button>
+      </div>
+      <div id="occ-content"></div>
+    </div>
+
+    <!-- TAB: Horas pico -->
+    <div class="tab-panel" id="tab-peak">
+      <div class="filter-bar">
+        <div class="form-group">
+          <label>Sucursal</label>
+          <select id="peak-branch" class="form-control" style="min-width:180px">
+            <option value="">Seleccionar...</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Fecha desde</label>
+          <input type="date" id="peak-from" class="form-control">
+        </div>
+        <div class="form-group">
+          <label>Fecha hasta</label>
+          <input type="date" id="peak-to" class="form-control">
+        </div>
+        <button class="btn btn-primary" id="peak-btn">Cargar</button>
+      </div>
+      <div id="peak-content"></div>
+    </div>
+  </main>
+</div>
+
+<script type="module">
+import { reporting, catalog } from '../js/api.js';
+import { requireAdmin, getBranchId, getRoles, getTenantId } from '../js/auth.js';
+import { renderSidebar, loadingHtml, emptyHtml, errorHtml } from '../js/components.js';
+import { friendlyError, escHtml, today } from '../js/utils.js';
+
+requireAdmin();
+document.getElementById('sidebar-slot').appendChild(renderSidebar('reportes.html'));
+
+const todayStr  = today();
+const thisMonth = todayStr.slice(0, 7);
+
+// Init date inputs
+document.getElementById('sum-date').value  = todayStr;
+document.getElementById('svc-from').value  = thisMonth;
+document.getElementById('svc-to').value    = thisMonth;
+document.getElementById('occ-from').value  = thisMonth;
+document.getElementById('occ-to').value    = thisMonth;
+document.getElementById('peak-from').value = todayStr;
+document.getElementById('peak-to').value   = todayStr;
+
+// Load branches into all selects
+let branches = [];
+try {
+  const res = await catalog.getBranches();
+  branches = Array.isArray(res) ? res : (res?.items ?? []);
+  ['sum-branch','svc-branch','occ-branch','peak-branch'].forEach(id => {
+    const sel = document.getElementById(id);
+    if (id === 'peak-branch') sel.innerHTML = '<option value="">Seleccionar...</option>';
+    branches.forEach(b => {
+      const o = document.createElement('option');
+      o.value = b.id; o.textContent = b.name;
+      sel.appendChild(o);
+    });
+    const myBranch = getBranchId();
+    if (myBranch) sel.value = myBranch;
+  });
+} catch {}
+
+// Tabs
+document.querySelectorAll('.tab-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById(`tab-${btn.dataset.tab}`).classList.add('active');
+  });
+});
+
+const pendingBanner = document.getElementById('pending-sync');
+function checkPending(data) {
+  if (data?.dataStatus === 'PENDING_SYNC') pendingBanner.style.display = 'block';
+  else pendingBanner.style.display = 'none';
+}
+
+/* ── Tab: Resumen diario ─────────────────────────────────────────────────── */
+document.getElementById('sum-btn').addEventListener('click', loadSummary);
+async function loadSummary() {
+  const content = document.getElementById('sum-content');
+  content.innerHTML = loadingHtml();
+  try {
+    const params = {
+      date:     document.getElementById('sum-date').value,
+      branchId: document.getElementById('sum-branch').value || undefined,
+    };
+    const data = await reporting.dailySummary(params);
+    checkPending(data);
+    const s = data?.summary ?? data;
+    content.innerHTML = `
+      <div class="card-grid">
+        ${statCard('Creadas',      s?.totalCreated    ?? 0, '📋', 'badge-blue')}
+        ${statCard('Confirmadas',  s?.totalConfirmed  ?? 0, '✅', 'badge-blue')}
+        ${statCard('Atendidas',    s?.totalAttended   ?? 0, '🎯', 'badge-green')}
+        ${statCard('No-show',      s?.totalNoShow     ?? 0, '😶', 'badge-gray')}
+        ${statCard('Canceladas',   s?.totalCancelled  ?? 0, '❌', 'badge-red')}
+        ${statCard('Minutos',      s?.totalMinutes    ?? 0, '⏱️', 'badge-orange')}
+      </div>
+      ${data?.dataStatus === 'PENDING_SYNC' ? '<div class="alert alert-warning mt-4">Datos siendo sincronizados, pueden estar incompletos.</div>' : ''}`;
+  } catch (err) {
+    content.innerHTML = errorHtml(friendlyError(err));
+  }
+}
+
+function statCard(label, value, icon, cls) {
+  return `<div class="card stat-card">
+    <div class="stat-label">${icon} ${label}</div>
+    <div class="stat-value">${value}</div>
+  </div>`;
+}
+
+/* ── Tab: Top servicios ──────────────────────────────────────────────────── */
+document.getElementById('svc-btn').addEventListener('click', loadServices);
+async function loadServices() {
+  const content = document.getElementById('svc-content');
+  content.innerHTML = loadingHtml();
+  try {
+    const params = {
+      monthFrom: document.getElementById('svc-from').value,
+      monthTo:   document.getElementById('svc-to').value   || undefined,
+      branchId:  document.getElementById('svc-branch').value || undefined,
+      limit:     document.getElementById('svc-limit').value || undefined,
+    };
+    const data = await reporting.topServices(params);
+    checkPending(data);
+    const list = data?.services ?? data ?? [];
+    if (!list.length) { content.innerHTML = emptyHtml('Sin datos'); return; }
+    content.innerHTML = `
+      <div class="card">
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>#</th><th>Servicio</th><th>Creadas</th><th>Atendidas</th><th>Canceladas</th></tr></thead>
+            <tbody>
+              ${list.map((s, i) => `
+                <tr>
+                  <td><strong>#${i + 1}</strong></td>
+                  <td>${escHtml(s.serviceName ?? s.service_name ?? '—')}</td>
+                  <td>${s.totalCreated ?? 0}</td>
+                  <td>${s.totalAttended ?? 0}</td>
+                  <td>${s.totalCancelled ?? 0}</td>
+                </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>`;
+  } catch (err) {
+    content.innerHTML = errorHtml(friendlyError(err));
+  }
+}
+
+/* ── Tab: Ocupación ──────────────────────────────────────────────────────── */
+document.getElementById('occ-btn').addEventListener('click', loadOccupancy);
+async function loadOccupancy() {
+  const content = document.getElementById('occ-content');
+  content.innerHTML = loadingHtml();
+  try {
+    const params = {
+      branchId:  document.getElementById('occ-branch').value || undefined,
+      monthFrom: document.getElementById('occ-from').value,
+      monthTo:   document.getElementById('occ-to').value || undefined,
+    };
+    const data = await reporting.occupancy(params);
+    checkPending(data);
+    const list = data?.resources ?? data ?? [];
+    if (!list.length) { content.innerHTML = emptyHtml('Sin datos de ocupación'); return; }
+    content.innerHTML = `
+      <div class="card">
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Recurso</th><th>Sucursal</th><th>Minutos reservados</th><th>Minutos disponibles</th><th>Ocupación</th></tr></thead>
+            <tbody>
+              ${list.map(r => {
+                const pct = r.occupancyPercent ?? (r.totalMinutes && r.availableMinutes ? Math.round(r.totalMinutes / r.availableMinutes * 100) : 0);
+                return `<tr>
+                  <td><strong>${escHtml(r.resourceName ?? '—')}</strong></td>
+                  <td>${escHtml(r.branchName ?? '—')}</td>
+                  <td>${r.totalMinutes ?? 0}</td>
+                  <td>${r.availableMinutes ?? '—'}</td>
+                  <td>
+                    <div style="display:flex;align-items:center;gap:.5rem">
+                      <div class="peak-bar-wrap" style="width:80px">
+                        <div class="peak-bar" style="width:${Math.min(pct, 100)}%"></div>
+                      </div>
+                      <span>${pct}%</span>
+                    </div>
+                  </td>
+                </tr>`;
+              }).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>`;
+  } catch (err) {
+    content.innerHTML = errorHtml(friendlyError(err));
+  }
+}
+
+/* ── Tab: Horas pico ─────────────────────────────────────────────────────── */
+document.getElementById('peak-btn').addEventListener('click', loadPeakHours);
+async function loadPeakHours() {
+  const content = document.getElementById('peak-content');
+  const branchId = document.getElementById('peak-branch').value;
+  if (!branchId) { content.innerHTML = `<div class="alert alert-warning">Seleccioná una sucursal.</div>`; return; }
+
+  content.innerHTML = loadingHtml();
+  try {
+    const from = document.getElementById('peak-from').value;
+    const to   = document.getElementById('peak-to').value;
+    const params = {
+      branchId,
+      dateFrom: from !== to ? from : undefined,
+      dateTo:   from !== to ? to   : undefined,
+      date:     from === to ? from : undefined,
+    };
+    const data = await reporting.peakHours(params);
+    checkPending(data);
+    const hours = data?.hours ?? data ?? [];
+    if (!hours.length) { content.innerHTML = emptyHtml('Sin datos de horas pico'); return; }
+
+    const maxVal = Math.max(...hours.map(h => h.totalCreated ?? 0), 1);
+    content.innerHTML = `
+      <div class="card">
+        <div class="card-header"><h3>Reservas por hora del día</h3></div>
+        <div class="card-body">
+          <div class="peak-bars">
+            ${hours.map(h => {
+              const val = h.totalCreated ?? 0;
+              const pct = Math.round(val / maxVal * 100);
+              const hour = String(h.hourOfDay ?? 0).padStart(2, '0');
+              return `<div class="peak-row">
+                <span class="peak-hour">${hour}:00</span>
+                <div class="peak-bar-wrap"><div class="peak-bar" style="width:${pct}%"></div></div>
+                <span class="peak-val">${val} <small class="text-muted">creadas</small></span>
+                ${h.totalAttended ? `<span class="text-xs text-muted" style="margin-left:.5rem">${h.totalAttended} atendidas</span>` : ''}
+              </div>`;
+            }).join('')}
+          </div>
+        </div>
+      </div>`;
+  } catch (err) {
+    content.innerHTML = errorHtml(friendlyError(err));
+  }
+}
+
+// Auto-load first tab
+loadSummary();
+</script>
+</body>
+</html>

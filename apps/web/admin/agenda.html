@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Agenda — ReservasSys</title>
+  <link rel="stylesheet" href="../css/main.css">
+</head>
+<body>
+<div class="app-shell">
+  <div id="sidebar-slot"></div>
+
+  <main class="main-content">
+    <div class="page-header">
+      <h1>📅 Agenda del día</h1>
+      <button class="btn btn-secondary btn-sm" id="block-btn">+ Nuevo bloqueo</button>
+    </div>
+
+    <!-- Filters -->
+    <div class="filter-bar">
+      <div class="form-group">
+        <label>Fecha</label>
+        <input type="date" id="filter-date" class="form-control">
+      </div>
+      <div class="form-group">
+        <label>Sucursal</label>
+        <select id="filter-branch" class="form-control" style="min-width:180px">
+          <option value="">Todas</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Recurso</label>
+        <select id="filter-resource" class="form-control" style="min-width:160px">
+          <option value="">Todos</option>
+        </select>
+      </div>
+      <button class="btn btn-primary" id="search-btn">Buscar</button>
+    </div>
+
+    <!-- Reservas -->
+    <div class="card" style="margin-bottom:1.5rem">
+      <div class="card-header"><h3>Reservas</h3></div>
+      <div id="reservas-content" class="table-wrap"></div>
+    </div>
+
+    <!-- Bloqueos -->
+    <div class="card">
+      <div class="card-header"><h3>Bloqueos activos</h3></div>
+      <div id="bloqueos-content" class="table-wrap"></div>
+    </div>
+  </main>
+</div>
+
+<script type="module">
+import { booking, catalog } from '../js/api.js';
+import { requireAdmin, getBranchId, getRoles } from '../js/auth.js';
+import { renderSidebar, toast, confirmModal, formModal, loadingHtml, emptyHtml, errorHtml } from '../js/components.js';
+import { badge, formatDateTime, formatTime, friendlyError, escHtml, today } from '../js/utils.js';
+
+requireAdmin();
+document.getElementById('sidebar-slot').appendChild(renderSidebar('agenda.html'));
+
+const filterDate     = document.getElementById('filter-date');
+const filterBranch   = document.getElementById('filter-branch');
+const filterResource = document.getElementById('filter-resource');
+const searchBtn      = document.getElementById('search-btn');
+const reservasDiv    = document.getElementById('reservas-content');
+const bloqueosDiv    = document.getElementById('bloqueos-content');
+
+filterDate.value = today();
+
+// Load branches
+try {
+  const branches = await catalog.getBranches();
+  const list = Array.isArray(branches) ? branches : (branches?.items ?? []);
+  list.forEach(b => {
+    const o = document.createElement('option');
+    o.value = b.id; o.textContent = b.name;
+    filterBranch.appendChild(o);
+  });
+  const myBranch = getBranchId();
+  if (myBranch) filterBranch.value = myBranch;
+} catch {}
+
+// Load resources on branch change
+filterBranch.addEventListener('change', async () => {
+  filterResource.innerHTML = '<option value="">Todos</option>';
+  if (!filterBranch.value) return;
+  try {
+    const res = await catalog.getResources({ branchId: filterBranch.value });
+    const list = Array.isArray(res) ? res : (res?.items ?? []);
+    list.forEach(r => {
+      const o = document.createElement('option');
+      o.value = r.id; o.textContent = r.name;
+      filterResource.appendChild(o);
+    });
+  } catch {}
+});
+
+async function loadAgenda() {
+  reservasDiv.innerHTML = loadingHtml();
+  bloqueosDiv.innerHTML = loadingHtml();
+
+  const params = {
+    date:       filterDate.value,
+    branchId:   filterBranch.value   || undefined,
+    resourceId: filterResource.value || undefined,
+  };
+
+  try {
+    const data = await booking.agenda(params);
+    const reservas = data?.reservations ?? data ?? [];
+    const bloqueos = data?.blocks ?? [];
+
+    // Reservas table
+    if (!reservas.length) {
+      reservasDiv.innerHTML = emptyHtml('Sin reservas para este día');
+    } else {
+      reservasDiv.innerHTML = `
+        <table>
+          <thead><tr>
+            <th>Hora</th><th>Cliente</th><th>Servicio</th><th>Recurso</th><th>Estado</th><th class="actions-col">Acciones</th>
+          </tr></thead>
+          <tbody>
+            ${reservas.map(r => `
+              <tr id="row-${r.id}">
+                <td>${formatTime(r.startAt)} – ${formatTime(r.endAt)}</td>
+                <td>${escHtml(r.clientName ?? r.clientEmail ?? '—')}</td>
+                <td>${escHtml(r.serviceName ?? '—')}</td>
+                <td>${escHtml(r.resourceName ?? '—')}</td>
+                <td>${badge(r.status)}</td>
+                <td class="actions-col">
+                  ${r.status === 'confirmed' ? `
+                    <button class="btn btn-success btn-sm" data-attend="${r.id}">Atendida</button>
+                    <button class="btn btn-warning btn-sm" data-noshow="${r.id}">No-show</button>
+                    <button class="btn btn-danger btn-sm"  data-cancel="${r.id}">Cancelar</button>
+                  ` : '—'}
+                </td>
+              </tr>`).join('')}
+          </tbody>
+        </table>`;
+
+      // Actions
+      reservasDiv.querySelectorAll('[data-attend]').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          if (!await confirmModal('¿Marcar como atendida?', 'Confirmar', false)) return;
+          try {
+            await booking.attend(btn.dataset.attend);
+            toast('Marcada como atendida.', 'success');
+            loadAgenda();
+          } catch (err) { toast(friendlyError(err), 'error'); }
+        });
+      });
+
+      reservasDiv.querySelectorAll('[data-noshow]').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          if (!await confirmModal('¿Marcar como no presentado?', 'Confirmar')) return;
+          try {
+            await booking.noShow(btn.dataset.noshow);
+            toast('Marcado como no-show.', 'success');
+            loadAgenda();
+          } catch (err) { toast(friendlyError(err), 'error'); }
+        });
+      });
+
+      reservasDiv.querySelectorAll('[data-cancel]').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          if (!await confirmModal('¿Cancelar esta reserva?', 'Cancelar')) return;
+          try {
+            await booking.cancel(btn.dataset.cancel, 'Cancelado por administrador');
+            toast('Reserva cancelada.', 'success');
+            loadAgenda();
+          } catch (err) { toast(friendlyError(err), 'error'); }
+        });
+      });
+    }
+
+    // Bloqueos table
+    if (!bloqueos.length) {
+      bloqueosDiv.innerHTML = emptyHtml('Sin bloqueos activos');
+    } else {
+      bloqueosDiv.innerHTML = `
+        <table>
+          <thead><tr>
+            <th>Recurso</th><th>Desde</th><th>Hasta</th><th>Motivo</th><th>Estado</th><th class="actions-col">Acciones</th>
+          </tr></thead>
+          <tbody>
+            ${bloqueos.map(b => `
+              <tr>
+                <td>${escHtml(b.resourceName ?? '—')}</td>
+                <td>${formatTime(b.startAt)}</td>
+                <td>${formatTime(b.endAt)}</td>
+                <td>${escHtml(b.reason ?? '—')}</td>
+                <td>${badge(b.status ?? 'active')}</td>
+                <td class="actions-col">
+                  ${b.status !== 'cancelled' ? `<button class="btn btn-danger btn-sm" data-cancelblock="${b.id}">Cancelar</button>` : '—'}
+                </td>
+              </tr>`).join('')}
+          </tbody>
+        </table>`;
+
+      bloqueosDiv.querySelectorAll('[data-cancelblock]').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          if (!await confirmModal('¿Cancelar este bloqueo?', 'Confirmar')) return;
+          try {
+            await booking.cancelBlock(btn.dataset.cancelblock);
+            toast('Bloqueo cancelado.', 'success');
+            loadAgenda();
+          } catch (err) { toast(friendlyError(err), 'error'); }
+        });
+      });
+    }
+  } catch (err) {
+    reservasDiv.innerHTML = errorHtml(friendlyError(err));
+    bloqueosDiv.innerHTML = '';
+  }
+}
+
+searchBtn.addEventListener('click', loadAgenda);
+filterDate.addEventListener('change', loadAgenda);
+
+// New block modal
+document.getElementById('block-btn').addEventListener('click', async () => {
+  let resourceOptions = '<option value="">Seleccionar...</option>';
+  try {
+    const params = filterBranch.value ? { branchId: filterBranch.value } : {};
+    const res = await catalog.getResources(params);
+    const list = Array.isArray(res) ? res : (res?.items ?? []);
+    resourceOptions += list.map(r => `<option value="${r.id}">${escHtml(r.name)}</option>`).join('');
+  } catch {}
+
+  const data = await formModal('Crear bloqueo', `
+    <div class="form-group">
+      <label>Recurso</label>
+      <select name="resourceId" class="form-control" required>${resourceOptions}</select>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>Desde</label>
+        <input type="datetime-local" name="startAt" class="form-control" required>
+      </div>
+      <div class="form-group">
+        <label>Hasta</label>
+        <input type="datetime-local" name="endAt" class="form-control" required>
+      </div>
+    </div>
+    <div class="form-group">
+      <label>Motivo</label>
+      <input type="text" name="reason" class="form-control" placeholder="Ej: Mantenimiento">
+    </div>`, 'Crear bloqueo');
+
+  if (!data || !data.resourceId || !data.startAt || !data.endAt) return;
+  try {
+    await booking.createBlock({
+      resourceId: data.resourceId,
+      startAt:    new Date(data.startAt).toISOString(),
+      endAt:      new Date(data.endAt).toISOString(),
+      reason:     data.reason || undefined,
+    });
+    toast('Bloqueo creado.', 'success');
+    loadAgenda();
+  } catch (err) { toast(friendlyError(err), 'error'); }
+});
+
+loadAgenda();
+</script>
+</body>
+</html>

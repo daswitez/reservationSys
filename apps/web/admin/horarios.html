@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Horarios — ReservasSys</title>
+  <link rel="stylesheet" href="../css/main.css">
+</head>
+<body>
+<div class="app-shell">
+  <div id="sidebar-slot"></div>
+
+  <main class="main-content">
+    <div class="page-header">
+      <h1>🕐 Horarios base</h1>
+    </div>
+
+    <div class="card" style="margin-bottom:1.5rem">
+      <div class="card-header"><h3>Seleccionar recurso</h3></div>
+      <div class="card-body" style="display:flex;gap:1rem;flex-wrap:wrap;align-items:flex-end">
+        <div class="form-group" style="margin-bottom:0;min-width:220px">
+          <label>Sucursal</label>
+          <select id="sel-branch" class="form-control"></select>
+        </div>
+        <div class="form-group" style="margin-bottom:0;min-width:220px">
+          <label>Recurso</label>
+          <select id="sel-resource" class="form-control"><option value="">— primero elegí sucursal —</option></select>
+        </div>
+        <button class="btn btn-primary" id="load-btn">Ver horarios</button>
+      </div>
+    </div>
+
+    <div id="schedules-section" style="display:none">
+      <div class="card">
+        <div class="card-header">
+          <h3 id="resource-title">Horarios</h3>
+          <button class="btn btn-primary btn-sm" id="new-schedule-btn">+ Agregar horario</button>
+        </div>
+        <div id="content" class="table-wrap"></div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<script type="module">
+import { catalog } from '../js/api.js';
+import { requireAdmin, getBranchId } from '../js/auth.js';
+import { renderSidebar, toast, confirmModal, formModal, loadingHtml, emptyHtml, errorHtml } from '../js/components.js';
+import { DAYS_ES, friendlyError, escHtml } from '../js/utils.js';
+
+requireAdmin();
+document.getElementById('sidebar-slot').appendChild(renderSidebar('horarios.html'));
+
+const selBranch   = document.getElementById('sel-branch');
+const selResource = document.getElementById('sel-resource');
+const content     = document.getElementById('content');
+const section     = document.getElementById('schedules-section');
+let resources = [];
+
+// Load branches
+try {
+  const res = await catalog.getBranches();
+  const list = Array.isArray(res) ? res : (res?.items ?? []);
+  list.forEach(b => {
+    const o = document.createElement('option');
+    o.value = b.id; o.textContent = b.name;
+    selBranch.appendChild(o);
+  });
+  const myBranch = getBranchId();
+  if (myBranch) selBranch.value = myBranch;
+  if (selBranch.value) loadResources();
+} catch {}
+
+selBranch.addEventListener('change', loadResources);
+
+async function loadResources() {
+  selResource.innerHTML = '<option value="">Cargando...</option>';
+  resources = [];
+  if (!selBranch.value) { selResource.innerHTML = '<option value="">— elegí una sucursal —</option>'; return; }
+  try {
+    const res = await catalog.getResources({ branchId: selBranch.value });
+    resources = Array.isArray(res) ? res : (res?.items ?? []);
+    selResource.innerHTML = '<option value="">Seleccionar recurso...</option>' +
+      resources.map(r => `<option value="${r.id}">${escHtml(r.name)}</option>`).join('');
+  } catch (err) {
+    selResource.innerHTML = '<option value="">Error cargando recursos</option>';
+  }
+}
+
+document.getElementById('load-btn').addEventListener('click', () => {
+  if (!selResource.value) { toast('Seleccioná un recurso.', 'warning'); return; }
+  loadSchedules();
+});
+
+async function loadSchedules() {
+  section.style.display = 'block';
+  const r = resources.find(x => x.id === selResource.value);
+  document.getElementById('resource-title').textContent = `Horarios de: ${r?.name ?? selResource.value}`;
+  content.innerHTML = loadingHtml();
+
+  try {
+    const res  = await catalog.getSchedules(selResource.value);
+    const list = Array.isArray(res) ? res : (res?.items ?? []);
+    if (!list.length) { content.innerHTML = emptyHtml('Sin horarios configurados'); return; }
+
+    const sorted = [...list].sort((a, b) => (a.dayOfWeek ?? 0) - (b.dayOfWeek ?? 0) || a.startTime.localeCompare(b.startTime));
+    content.innerHTML = `
+      <table>
+        <thead><tr><th>Día</th><th>Inicio</th><th>Fin</th><th class="actions-col">Acciones</th></tr></thead>
+        <tbody>
+          ${sorted.map(s => `
+            <tr>
+              <td>${DAYS_ES[s.dayOfWeek ?? 0]}</td>
+              <td>${s.startTime}</td>
+              <td>${s.endTime}</td>
+              <td class="actions-col">
+                <button class="btn btn-danger btn-sm" data-del="${s.id}">Eliminar</button>
+              </td>
+            </tr>`).join('')}
+        </tbody>
+      </table>`;
+
+    content.querySelectorAll('[data-del]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        if (!await confirmModal('¿Eliminar este horario?', 'Eliminar')) return;
+        try {
+          await catalog.deleteSchedule(btn.dataset.del);
+          toast('Horario eliminado.', 'success');
+          loadSchedules();
+        } catch (err) { toast(friendlyError(err), 'error'); }
+      });
+    });
+  } catch (err) {
+    content.innerHTML = errorHtml(friendlyError(err));
+  }
+}
+
+document.getElementById('new-schedule-btn').addEventListener('click', async () => {
+  const dayOptions = DAYS_ES.map((d, i) => `<option value="${i}">${d}</option>`).join('');
+  const data = await formModal('Agregar horario', `
+    <div class="form-group"><label>Día de la semana</label>
+      <select name="dayOfWeek" class="form-control">${dayOptions}</select>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label>Hora inicio</label><input name="startTime" type="time" class="form-control" value="09:00" required></div>
+      <div class="form-group"><label>Hora fin</label><input name="endTime" type="time" class="form-control" value="18:00" required></div>
+    </div>`, 'Agregar');
+
+  if (!data || !data.startTime || !data.endTime) return;
+  try {
+    await catalog.createSchedule({
+      resourceId: selResource.value,
+      dayOfWeek:  +data.dayOfWeek,
+      startTime:  data.startTime,
+      endTime:    data.endTime,
+    });
+    toast('Horario agregado.', 'success');
+    loadSchedules();
+  } catch (err) { toast(friendlyError(err), 'error'); }
+});
+</script>
+</body>
+</html>

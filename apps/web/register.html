@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Registrarse — ReservasSys</title>
+  <link rel="stylesheet" href="css/main.css">
+</head>
+<body>
+<div class="auth-page">
+  <div class="auth-card">
+    <div class="auth-logo">
+      <h1>ReservasSys</h1>
+      <p>Crear cuenta de cliente</p>
+    </div>
+
+    <div id="error-box" class="alert alert-error" style="display:none"></div>
+    <div id="success-box" class="alert alert-success" style="display:none">
+      ¡Cuenta creada! <a href="index.html">Iniciá sesión</a>
+    </div>
+
+    <form id="register-form">
+      <div class="form-group">
+        <label for="name">Nombre completo</label>
+        <input type="text" id="name" name="name" class="form-control" placeholder="Juan García" required>
+      </div>
+      <div class="form-group">
+        <label for="email">Email</label>
+        <input type="email" id="email" name="email" class="form-control" placeholder="tu@email.com" required>
+      </div>
+      <div class="form-group">
+        <label for="password">Contraseña</label>
+        <input type="password" id="password" name="password" class="form-control" placeholder="Mínimo 6 caracteres" required minlength="6">
+      </div>
+      <button type="submit" class="btn btn-primary btn-full btn-lg" id="submit-btn">
+        Crear cuenta
+      </button>
+    </form>
+
+    <div class="auth-footer">
+      ¿Ya tenés cuenta? <a href="index.html">Iniciar sesión</a>
+    </div>
+  </div>
+</div>
+
+<script type="module">
+import { identity } from './js/api.js';
+import { friendlyError } from './js/utils.js';
+
+const form       = document.getElementById('register-form');
+const submitBtn  = document.getElementById('submit-btn');
+const errorBox   = document.getElementById('error-box');
+const successBox = document.getElementById('success-box');
+
+form.addEventListener('submit', async e => {
+  e.preventDefault();
+  errorBox.style.display   = 'none';
+  successBox.style.display = 'none';
+  submitBtn.disabled = true;
+  submitBtn.textContent = 'Registrando...';
+
+  try {
+    await identity.register({
+      name:     form.name.value.trim(),
+      email:    form.email.value.trim(),
+      password: form.password.value,
+    });
+    successBox.style.display = 'block';
+    form.reset();
+  } catch (err) {
+    errorBox.textContent = friendlyError(err);
+    errorBox.style.display = 'block';
+  } finally {
+    submitBtn.disabled = false;
+    submitBtn.textContent = 'Crear cuenta';
+  }
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Reservar turno — ReservasSys</title>
+  <link rel="stylesheet" href="css/main.css">
+</head>
+<body>
+
+<nav class="pub-nav">
+  <span class="pub-nav-brand"><a href="negocios.html" style="color:inherit">← Negocios</a></span>
+  <div class="pub-nav-links">
+    <a href="mis-reservas.html" class="btn btn-secondary btn-sm">Mis reservas</a>
+  </div>
+</nav>
+
+<div class="wizard-container">
+  <h2 id="tenant-title" style="margin-bottom:1.5rem">Reservar turno</h2>
+
+  <!-- Wizard steps -->
+  <div class="wizard-steps" id="wizard-steps">
+    <div class="wizard-step active" data-step="1"><span class="step-num">1</span><span class="wizard-step-label">Sucursal</span></div>
+    <div class="wizard-step"        data-step="2"><span class="step-num">2</span><span class="wizard-step-label">Servicio</span></div>
+    <div class="wizard-step"        data-step="3"><span class="step-num">3</span><span class="wizard-step-label">Fecha</span></div>
+    <div class="wizard-step"        data-step="4"><span class="step-num">4</span><span class="wizard-step-label">Horario</span></div>
+    <div class="wizard-step"        data-step="5"><span class="step-num">5</span><span class="wizard-step-label">Confirmar</span></div>
+  </div>
+
+  <!-- Panels -->
+  <div class="card">
+    <div class="card-body" id="step-content">
+      <div class="loading-center"><div class="spinner"></div></div>
+    </div>
+  </div>
+
+  <div id="toast-area"></div>
+</div>
+
+<script type="module">
+import { catalog, booking } from './js/api.js';
+import { getToken, requireAuth, saveReservationId } from './js/auth.js';
+import { toast } from './js/components.js';
+import { formatTime, friendlyError, escHtml } from './js/utils.js';
+
+requireAuth();
+
+const params     = new URLSearchParams(location.search);
+const tenantSlug = params.get('tenantSlug') ?? '';
+const tenantName = params.get('tenantName') ?? 'el negocio';
+
+document.getElementById('tenant-title').textContent = `Reservar en ${tenantName}`;
+
+const stepContent = document.getElementById('step-content');
+const stepEls     = document.querySelectorAll('.wizard-step');
+
+let currentStep = 1;
+const state = { branch: null, service: null, date: null, slot: null };
+
+function setStep(n) {
+  currentStep = n;
+  stepEls.forEach(el => {
+    const s = +el.dataset.step;
+    el.classList.toggle('active', s === n);
+    el.classList.toggle('done',   s < n);
+  });
+}
+
+function setContent(html) { stepContent.innerHTML = html; }
+
+/* ── STEP 1: Sucursal ────────────────────────────────────────────────────── */
+async function loadBranches() {
+  setContent(`<div class="loading-center"><div class="spinner"></div></div>`);
+  try {
+    const branches = await catalog.publicBranches(tenantSlug);
+    const list = Array.isArray(branches) ? branches : (branches?.items ?? []);
+    if (!list.length) { setContent(`<div class="state-box"><div class="state-icon">🏢</div><h4>Sin sucursales disponibles</h4></div>`); return; }
+
+    setContent(`<h3 style="margin-bottom:1rem">Elegí una sucursal</h3>
+      <div style="display:flex;flex-direction:column;gap:.5rem">
+        ${list.map(b => `
+          <button class="slot-btn" style="text-align:left;padding:.875rem 1rem" data-id="${b.id}" data-name="${escHtml(b.name)}">
+            <strong>${escHtml(b.name)}</strong>
+            ${b.address ? `<br><small class="text-muted">${escHtml(b.address)}</small>` : ''}
+          </button>`).join('')}
+      </div>`);
+
+    stepContent.querySelectorAll('[data-id]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        state.branch = { id: btn.dataset.id, name: btn.dataset.name };
+        setStep(2);
+        loadServices();
+      });
+    });
+  } catch (err) {
+    setContent(`<div class="alert alert-error">${friendlyError(err)}</div>`);
+  }
+}
+
+/* ── STEP 2: Servicio ────────────────────────────────────────────────────── */
+async function loadServices() {
+  setContent(`<div class="loading-center"><div class="spinner"></div></div>`);
+  try {
+    const services = await catalog.publicServices(tenantSlug, state.branch.id);
+    const list = Array.isArray(services) ? services : (services?.items ?? []);
+    if (!list.length) { setContent(`<div class="state-box"><h4>Sin servicios disponibles en esta sucursal</h4><br><button class="btn btn-secondary" id="back-btn">← Volver</button></div>`); document.getElementById('back-btn').onclick = () => { setStep(1); loadBranches(); }; return; }
+
+    setContent(`<h3 style="margin-bottom:1rem">Elegí un servicio</h3>
+      <div style="display:flex;flex-direction:column;gap:.5rem">
+        ${list.map(s => `
+          <button class="slot-btn" style="text-align:left;padding:.875rem 1rem" data-id="${s.id}" data-name="${escHtml(s.name)}" data-duration="${s.durationMinutes ?? 30}">
+            <strong>${escHtml(s.name)}</strong>
+            <br><small class="text-muted">Duración: ${s.durationMinutes ?? 30} min${s.price ? ` · $${s.price}` : ''}</small>
+          </button>`).join('')}
+      </div>
+      <div style="margin-top:1rem"><button class="btn btn-ghost btn-sm" id="back-btn">← Volver</button></div>`);
+
+    document.getElementById('back-btn').onclick = () => { setStep(1); loadBranches(); };
+    stepContent.querySelectorAll('[data-id]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        state.service = { id: btn.dataset.id, name: btn.dataset.name, duration: +btn.dataset.duration };
+        setStep(3);
+        renderDatePicker();
+      });
+    });
+  } catch (err) {
+    setContent(`<div class="alert alert-error">${friendlyError(err)}</div>`);
+  }
+}
+
+/* ── STEP 3: Fecha ───────────────────────────────────────────────────────── */
+function renderDatePicker() {
+  const todayStr = new Date().toISOString().slice(0, 10);
+  setContent(`
+    <h3 style="margin-bottom:1rem">Elegí una fecha</h3>
+    <div class="form-group">
+      <label for="date-pick">Fecha</label>
+      <input type="date" id="date-pick" class="form-control" min="${todayStr}" value="${todayStr}" style="max-width:240px">
+    </div>
+    <div style="margin-top:1rem;display:flex;gap:.75rem">
+      <button class="btn btn-ghost btn-sm" id="back-btn">← Volver</button>
+      <button class="btn btn-primary" id="next-btn">Ver horarios</button>
+    </div>`);
+
+  document.getElementById('back-btn').onclick = () => { setStep(2); loadServices(); };
+  document.getElementById('next-btn').onclick = () => {
+    state.date = document.getElementById('date-pick').value;
+    setStep(4);
+    loadSlots();
+  };
+}
+
+/* ── STEP 4: Horarios disponibles ────────────────────────────────────────── */
+async function loadSlots() {
+  setContent(`<div class="loading-center"><div class="spinner"></div></div>`);
+  try {
+    const slots = await booking.availability({
+      branchId:  state.branch.id,
+      serviceId: state.service.id,
+      date:      state.date,
+    });
+    const list = Array.isArray(slots) ? slots : (slots?.slots ?? []);
+    if (!list.length) {
+      setContent(`<div class="state-box"><div class="state-icon">🕐</div><h4>Sin horarios disponibles</h4><p>Probá con otra fecha.</p></div>
+        <button class="btn btn-ghost btn-sm" id="back-btn">← Cambiar fecha</button>`);
+      document.getElementById('back-btn').onclick = () => { setStep(3); renderDatePicker(); };
+      return;
+    }
+
+    setContent(`
+      <h3 style="margin-bottom:.25rem">Horarios disponibles</h3>
+      <p class="text-sm text-muted" style="margin-bottom:1rem">${state.date} · ${state.service.name}</p>
+      <div class="slot-grid" id="slot-grid">
+        ${list.map(s => `
+          <button class="slot-btn" data-start="${s.startAt}" data-end="${s.endAt}" data-resource="${s.resourceId ?? ''}">
+            ${formatTime(s.startAt)}
+          </button>`).join('')}
+      </div>
+      <div style="margin-top:1rem"><button class="btn btn-ghost btn-sm" id="back-btn">← Cambiar fecha</button></div>`);
+
+    document.getElementById('back-btn').onclick = () => { setStep(3); renderDatePicker(); };
+    stepContent.querySelectorAll('#slot-grid .slot-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        stepContent.querySelectorAll('#slot-grid .slot-btn').forEach(b => b.classList.remove('selected'));
+        btn.classList.add('selected');
+        state.slot = { startAt: btn.dataset.start, endAt: btn.dataset.end, resourceId: btn.dataset.resource };
+        setTimeout(() => { setStep(5); renderConfirm(); }, 180);
+      });
+    });
+  } catch (err) {
+    setContent(`<div class="alert alert-error">${friendlyError(err)}</div>
+      <button class="btn btn-ghost btn-sm" id="back-btn">← Cambiar fecha</button>`);
+    document.getElementById('back-btn').onclick = () => { setStep(3); renderDatePicker(); };
+  }
+}
+
+/* ── STEP 5: Confirmar ───────────────────────────────────────────────────── */
+function renderConfirm() {
+  setContent(`
+    <h3 style="margin-bottom:1rem">Confirmar reserva</h3>
+    <div class="card" style="margin-bottom:1.25rem;background:var(--gray-50)">
+      <div class="card-body" style="display:grid;grid-template-columns:1fr 1fr;gap:.75rem;font-size:.9rem">
+        <div><strong>Negocio</strong><br>${escHtml(tenantName)}</div>
+        <div><strong>Sucursal</strong><br>${escHtml(state.branch.name)}</div>
+        <div><strong>Servicio</strong><br>${escHtml(state.service.name)}</div>
+        <div><strong>Fecha y hora</strong><br>${formatTime(state.slot.startAt)} — ${state.date}</div>
+      </div>
+    </div>
+    <div class="form-group">
+      <label for="notes">Nota (opcional)</label>
+      <textarea id="notes" class="form-control" placeholder="Alguna aclaración para el negocio..."></textarea>
+    </div>
+    <div id="error-box" class="alert alert-error" style="display:none"></div>
+    <div style="display:flex;gap:.75rem;margin-top:1rem">
+      <button class="btn btn-ghost btn-sm" id="back-btn">← Cambiar horario</button>
+      <button class="btn btn-primary" id="confirm-btn">Confirmar reserva</button>
+    </div>`);
+
+  document.getElementById('back-btn').onclick = () => { setStep(4); loadSlots(); };
+  document.getElementById('confirm-btn').onclick = confirmBooking;
+}
+
+async function confirmBooking() {
+  const btn      = document.getElementById('confirm-btn');
+  const errorBox = document.getElementById('error-box');
+  const notes    = document.getElementById('notes').value.trim();
+
+  btn.disabled = true;
+  btn.textContent = 'Reservando...';
+  errorBox.style.display = 'none';
+
+  try {
+    const res = await booking.createReservation({
+      branchId:   state.branch.id,
+      serviceId:  state.service.id,
+      resourceId: state.slot.resourceId || undefined,
+      startAt:    state.slot.startAt,
+      endAt:      state.slot.endAt,
+      notes:      notes || undefined,
+    });
+
+    saveReservationId(res.id ?? res.reservationId);
+
+    setContent(`
+      <div class="state-box">
+        <div class="state-icon">🎉</div>
+        <h3>¡Reserva confirmada!</h3>
+        <p style="margin:.75rem 0">Tu turno fue registrado correctamente.</p>
+        <div style="display:flex;gap:.75rem;justify-content:center;margin-top:1.5rem">
+          <a href="mis-reservas.html" class="btn btn-primary">Ver mis reservas</a>
+          <a href="negocios.html" class="btn btn-secondary">Volver al inicio</a>
+        </div>
+      </div>`);
+    stepEls.forEach(el => el.classList.add('done'));
+  } catch (err) {
+    errorBox.textContent = friendlyError(err);
+    errorBox.style.display = 'block';
+    btn.disabled = false;
+    btn.textContent = 'Confirmar reserva';
+  }
+}
+
+// Start
+setStep(1);
+loadBranches();
+</script>
+</body>
+</html>

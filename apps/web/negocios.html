@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Negocios — ReservasSys</title>
+  <link rel="stylesheet" href="css/main.css">
+</head>
+<body>
+
+<nav class="pub-nav">
+  <span class="pub-nav-brand">ReservasSys</span>
+  <div class="pub-nav-links" id="nav-links"></div>
+</nav>
+
+<div class="pub-container">
+  <div style="margin-bottom:2rem">
+    <h1>Negocios disponibles</h1>
+    <p>Elegí un negocio para ver sus sucursales y reservar un turno.</p>
+  </div>
+  <div id="content"><div class="loading-center"><div class="spinner"></div></div></div>
+</div>
+
+<script type="module">
+import { identity } from './js/api.js';
+import { getToken, getRoles, clearSession, isAdmin } from './js/auth.js';
+import { escHtml } from './js/utils.js';
+
+// Nav
+const navLinks = document.getElementById('nav-links');
+const token = getToken();
+if (token) {
+  if (isAdmin()) {
+    navLinks.innerHTML = `<a href="/admin/agenda.html" class="btn btn-secondary btn-sm">Panel admin</a> <button class="btn btn-ghost btn-sm" id="logout-btn">Salir</button>`;
+  } else {
+    navLinks.innerHTML = `<a href="mis-reservas.html" class="btn btn-secondary btn-sm">Mis reservas</a> <button class="btn btn-ghost btn-sm" id="logout-btn">Salir</button>`;
+  }
+  document.getElementById('logout-btn')?.addEventListener('click', () => { clearSession(); location.reload(); });
+} else {
+  navLinks.innerHTML = `<a href="index.html" class="btn btn-primary btn-sm">Iniciar sesión</a>`;
+}
+
+// Load tenants
+const content = document.getElementById('content');
+try {
+  const tenants = await identity.tenants();
+  const list = Array.isArray(tenants) ? tenants : (tenants?.items ?? []);
+
+  if (!list.length) {
+    content.innerHTML = `<div class="state-box"><div class="state-icon">🏪</div><h4>No hay negocios disponibles</h4></div>`;
+  } else {
+    content.innerHTML = `<div class="card-grid">
+      ${list.map(t => `
+        <div class="card negocio-card" onclick="location.href='reservar.html?tenantSlug=${escHtml(t.slug ?? t.id)}&tenantName=${encodeURIComponent(t.name)}'">
+          <div class="negocio-name">${escHtml(t.name)}</div>
+          <div class="negocio-rubro">${escHtml(t.industry ?? t.category ?? '')}</div>
+          <button class="btn btn-primary btn-sm">Reservar turno →</button>
+        </div>`).join('')}
+    </div>`;
+  }
+} catch (err) {
+  content.innerHTML = `<div class="alert alert-error">No se pudo cargar los negocios: ${err.message}</div>`;
+}
+</script>
+</body>
+</html>

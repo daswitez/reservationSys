@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Mis reservas — ReservasSys</title>
+  <link rel="stylesheet" href="css/main.css">
+</head>
+<body>
+
+<nav class="pub-nav">
+  <span class="pub-nav-brand"><a href="negocios.html" style="color:inherit">ReservasSys</a></span>
+  <div class="pub-nav-links">
+    <a href="negocios.html" class="btn btn-secondary btn-sm">Negocios</a>
+    <button class="btn btn-ghost btn-sm" id="logout-btn">Salir</button>
+  </div>
+</nav>
+
+<div class="pub-container" style="max-width:720px">
+  <div class="page-header">
+    <h1>Mis reservas</h1>
+    <a href="negocios.html" class="btn btn-primary btn-sm">Nueva reserva</a>
+  </div>
+
+  <div class="alert alert-info" style="margin-bottom:1.5rem">
+    Solo se muestran las reservas realizadas desde este dispositivo y navegador.
+  </div>
+
+  <div id="content"><div class="loading-center"><div class="spinner"></div></div></div>
+</div>
+
+<script type="module">
+import { booking } from './js/api.js';
+import { requireAuth, getSavedIds, clearSession } from './js/auth.js';
+import { toast, confirmModal } from './js/components.js';
+import { badge, formatDateTime, friendlyError, escHtml } from './js/utils.js';
+
+requireAuth();
+document.getElementById('logout-btn').addEventListener('click', () => { clearSession(); location.href = 'index.html'; });
+
+const content = document.getElementById('content');
+
+async function load() {
+  const ids = getSavedIds();
+  if (!ids.length) {
+    content.innerHTML = `<div class="state-box"><div class="state-icon">📋</div><h4>No hay reservas guardadas</h4><p>Cuando hagas una reserva aparecerá aquí.</p></div>`;
+    return;
+  }
+
+  content.innerHTML = `<div class="loading-center"><div class="spinner"></div></div>`;
+
+  const results = await Promise.allSettled(ids.map(id => booking.getReservation(id)));
+  const reservas = results
+    .filter(r => r.status === 'fulfilled')
+    .map(r => r.value)
+    .filter(Boolean);
+
+  if (!reservas.length) {
+    content.innerHTML = `<div class="state-box"><div class="state-icon">📭</div><h4>No se encontraron reservas</h4></div>`;
+    return;
+  }
+
+  render(reservas);
+}
+
+function render(reservas) {
+  content.innerHTML = `
+    <div style="display:flex;flex-direction:column;gap:1rem" id="reservas-list">
+      ${reservas.map(r => reservaCard(r)).join('')}
+    </div>`;
+
+  content.querySelectorAll('[data-cancel]').forEach(btn => {
+    btn.addEventListener('click', () => cancelarReserva(btn.dataset.cancel));
+  });
+}
+
+function reservaCard(r) {
+  const canCancel = r.status === 'confirmed';
+  return `
+    <div class="card" id="card-${r.id}">
+      <div class="card-header">
+        <div>
+          <strong>${escHtml(r.serviceName ?? 'Servicio')}</strong>
+          <span style="margin-left:.75rem">${badge(r.status)}</span>
+        </div>
+        <span class="text-sm text-muted">#${r.id?.slice(0, 8)}</span>
+      </div>
+      <div class="card-body" style="display:grid;grid-template-columns:1fr 1fr;gap:.75rem;font-size:.9rem">
+        <div><strong>Sucursal</strong><br>${escHtml(r.branchName ?? '—')}</div>
+        <div><strong>Fecha y hora</strong><br>${formatDateTime(r.startAt)}</div>
+        ${r.resourceName ? `<div><strong>Recurso</strong><br>${escHtml(r.resourceName)}</div>` : ''}
+        ${r.notes ? `<div><strong>Nota</strong><br>${escHtml(r.notes)}</div>` : ''}
+      </div>
+      ${canCancel ? `
+        <div class="card-footer" style="text-align:right">
+          <button class="btn btn-danger btn-sm" data-cancel="${r.id}">Cancelar turno</button>
+        </div>` : ''}
+    </div>`;
+}
+
+async function cancelarReserva(id) {
+  const ok = await confirmModal('¿Cancelar este turno?', 'Sí, cancelar');
+  if (!ok) return;
+
+  try {
+    await booking.cancel(id, 'Cancelado por el cliente');
+    toast('Turno cancelado.', 'success');
+    load();
+  } catch (err) {
+    toast(friendlyError(err), 'error');
+  }
+}
+
+load();
+</script>
+</body>
+</html>

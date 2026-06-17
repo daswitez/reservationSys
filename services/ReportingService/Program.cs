@@ -85,8 +85,15 @@ builder.Services.AddAuthorizationBuilder()
         .RequireClaim("user_id")
         .RequireClaim("tenant_id"));
 
+builder.Services.AddCors(options =>
+    options.AddDefaultPolicy(p =>
+        p.WithOrigins("http://localhost:3000", "http://127.0.0.1:3000", "null")
+         .AllowAnyHeader()
+         .AllowAnyMethod()));
+
 var app = builder.Build();
 
+app.UseCors();
 app.UseSwagger();
 app.UseSwaggerUI(options =>
 {
