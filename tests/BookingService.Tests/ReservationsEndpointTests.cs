@@ -218,6 +218,321 @@ public sealed class ReservationsEndpointTests(BookingApiFactory factory)
     }
 
     [Fact]
+    public async Task Cancel_WithoutToken_ReturnsUnauthorized()
+    {
+        using var response = await _client.PatchAsJsonAsync(
+            $"/reservations/{Guid.NewGuid()}/cancel",
+            new { reason = "sin token" });
+
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Client_CanCancelOwnConfirmedReservation_WithHistoryAndOutbox()
+    {
+        var clientUserId = Guid.NewGuid();
+        var setup = await CreateReservationSetupAsync();
+        var reservationId = await CreateReservationInDbAsync(setup, clientUserId);
+
+        using var request = CancelRequest(reservationId, "client", clientUserId, "Cancelado por el cliente");
+        using var response = await _client.SendAsync(request);
+        using var payload = await response.Content.ReadFromJsonAsync<JsonDocument>();
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("CANCELLED", payload!.RootElement.GetProperty("data").GetProperty("status").GetString());
+
+        await using var scope = _factory.Services.CreateAsyncScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<BookingDbContext>();
+
+        var history = await dbContext.ReservationHistory
+            .SingleAsync(h => h.ReservationId == reservationId && h.Action == "CANCELLED");
+        Assert.Equal("CONFIRMED", history.PreviousStatus);
+        Assert.Equal("CANCELLED", history.NewStatus);
+        Assert.Equal(clientUserId, history.UserId);
+        Assert.Equal("Cancelado por el cliente", history.Reason);
+
+        var outbox = await dbContext.ReservationEventOutbox
+            .SingleAsync(o => o.AggregateId == reservationId && o.EventType == "ReservationCancelled");
+        Assert.Equal("PENDING", outbox.Status);
+    }
+
+    [Fact]
+    public async Task Client_CannotCancelAnotherClientsReservation_ReturnsForbidden()
+    {
+        var ownerClientId = Guid.NewGuid();
+        var otherClientId = Guid.NewGuid();
+        var setup = await CreateReservationSetupAsync();
+        var reservationId = await CreateReservationInDbAsync(setup, ownerClientId);
+
+        using var request = CancelRequest(reservationId, "client", otherClientId);
+        using var response = await _client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task TenantAdmin_CanCancelReservationInOwnTenant()
+    {
+        var clientUserId = Guid.NewGuid();
+        var setup = await CreateReservationSetupAsync();
+        var reservationId = await CreateReservationInDbAsync(setup, clientUserId);
+
+        using var request = CancelRequest(reservationId, "tenant_admin", Guid.NewGuid(), tenantId: setup.TenantId);
+        using var response = await _client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task TenantAdmin_CannotCancelReservationInOtherTenant_ReturnsForbidden()
+    {
+        var clientUserId = Guid.NewGuid();
+        var setup = await CreateReservationSetupAsync();
+        var reservationId = await CreateReservationInDbAsync(setup, clientUserId);
+
+        using var request = CancelRequest(reservationId, "tenant_admin", Guid.NewGuid(), tenantId: Guid.NewGuid());
+        using var response = await _client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Cancel_AlreadyCancelledReservation_ReturnsConflict()
+    {
+        var clientUserId = Guid.NewGuid();
+        var setup = await CreateReservationSetupAsync();
+        var reservationId = await CreateReservationInDbAsync(setup, clientUserId, status: "CANCELLED");
+
+        using var request = CancelRequest(reservationId, "client", clientUserId);
+        using var response = await _client.SendAsync(request);
+        using var payload = await response.Content.ReadFromJsonAsync<JsonDocument>();
+
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        Assert.Equal("RESERVATION_NOT_CANCELLABLE", payload!.RootElement.GetProperty("error").GetProperty("code").GetString());
+    }
+
+    [Fact]
+    public async Task Cancel_NonExistentReservation_ReturnsNotFound()
+    {
+        using var request = CancelRequest(Guid.NewGuid(), "client", Guid.NewGuid());
+        using var response = await _client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Attend_WithoutToken_ReturnsUnauthorized()
+    {
+        using var response = await _client.PatchAsync(
+            $"/reservations/{Guid.NewGuid()}/attend", null);
+
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task TenantAdmin_CanAttendConfirmedReservation_WithHistoryAndOutbox()
+    {
+        var adminId = Guid.NewGuid();
+        var clientUserId = Guid.NewGuid();
+        var setup = await CreateReservationSetupAsync();
+        var reservationId = await CreateReservationInDbAsync(setup, clientUserId);
+
+        using var request = AttendRequest(reservationId, "tenant_admin", adminId, setup.TenantId);
+        using var response = await _client.SendAsync(request);
+        using var payload = await response.Content.ReadFromJsonAsync<JsonDocument>();
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("ATTENDED", payload!.RootElement.GetProperty("data").GetProperty("status").GetString());
+
+        await using var scope = _factory.Services.CreateAsyncScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<BookingDbContext>();
+
+        var history = await dbContext.ReservationHistory
+            .SingleAsync(h => h.ReservationId == reservationId && h.Action == "ATTENDED");
+        Assert.Equal("CONFIRMED", history.PreviousStatus);
+        Assert.Equal("ATTENDED", history.NewStatus);
+        Assert.Equal(adminId, history.UserId);
+
+        var outbox = await dbContext.ReservationEventOutbox
+            .SingleAsync(o => o.AggregateId == reservationId && o.EventType == "ReservationAttended");
+        Assert.Equal("PENDING", outbox.Status);
+        using var eventPayload = JsonDocument.Parse(outbox.Payload);
+        Assert.Equal(reservationId, eventPayload.RootElement.GetProperty("reservationId").GetGuid());
+        Assert.Equal("ATTENDED", eventPayload.RootElement.GetProperty("status").GetString());
+    }
+
+    [Fact]
+    public async Task Client_CannotAttendReservation_ReturnsForbidden()
+    {
+        var clientUserId = Guid.NewGuid();
+        var setup = await CreateReservationSetupAsync();
+        var reservationId = await CreateReservationInDbAsync(setup, clientUserId);
+
+        using var request = AttendRequest(reservationId, "client", clientUserId);
+        using var response = await _client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task TenantAdmin_CannotAttendReservationInOtherTenant_ReturnsForbidden()
+    {
+        var clientUserId = Guid.NewGuid();
+        var setup = await CreateReservationSetupAsync();
+        var reservationId = await CreateReservationInDbAsync(setup, clientUserId);
+
+        using var request = AttendRequest(reservationId, "tenant_admin", Guid.NewGuid(), Guid.NewGuid());
+        using var response = await _client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Attend_AlreadyAttendedReservation_ReturnsConflict()
+    {
+        var clientUserId = Guid.NewGuid();
+        var setup = await CreateReservationSetupAsync();
+        var reservationId = await CreateReservationInDbAsync(setup, clientUserId, status: "ATTENDED");
+
+        using var request = AttendRequest(reservationId, "tenant_admin", Guid.NewGuid(), setup.TenantId);
+        using var response = await _client.SendAsync(request);
+        using var payload = await response.Content.ReadFromJsonAsync<JsonDocument>();
+
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        Assert.Equal("RESERVATION_NOT_ATTENDABLE", payload!.RootElement.GetProperty("error").GetProperty("code").GetString());
+    }
+
+    [Fact]
+    public async Task Attend_CancelledReservation_ReturnsConflict()
+    {
+        var clientUserId = Guid.NewGuid();
+        var setup = await CreateReservationSetupAsync();
+        var reservationId = await CreateReservationInDbAsync(setup, clientUserId, status: "CANCELLED");
+
+        using var request = AttendRequest(reservationId, "tenant_admin", Guid.NewGuid(), setup.TenantId);
+        using var response = await _client.SendAsync(request);
+        using var payload = await response.Content.ReadFromJsonAsync<JsonDocument>();
+
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        Assert.Equal("RESERVATION_NOT_ATTENDABLE", payload!.RootElement.GetProperty("error").GetProperty("code").GetString());
+    }
+
+    [Fact]
+    public async Task Attend_NonExistentReservation_ReturnsNotFound()
+    {
+        using var request = AttendRequest(Guid.NewGuid(), "tenant_admin", Guid.NewGuid(), Guid.NewGuid());
+        using var response = await _client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task NoShow_WithoutToken_ReturnsUnauthorized()
+    {
+        using var response = await _client.PatchAsync(
+            $"/reservations/{Guid.NewGuid()}/no-show", null);
+
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task TenantAdmin_CanMarkNoShowOnConfirmedReservation_WithHistoryAndOutbox()
+    {
+        var adminId = Guid.NewGuid();
+        var clientUserId = Guid.NewGuid();
+        var setup = await CreateReservationSetupAsync();
+        var reservationId = await CreateReservationInDbAsync(setup, clientUserId);
+
+        using var request = NoShowRequest(reservationId, "tenant_admin", adminId, setup.TenantId);
+        using var response = await _client.SendAsync(request);
+        using var payload = await response.Content.ReadFromJsonAsync<JsonDocument>();
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("NO_SHOW", payload!.RootElement.GetProperty("data").GetProperty("status").GetString());
+
+        await using var scope = _factory.Services.CreateAsyncScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<BookingDbContext>();
+
+        var history = await dbContext.ReservationHistory
+            .SingleAsync(h => h.ReservationId == reservationId && h.Action == "NO_SHOW");
+        Assert.Equal("CONFIRMED", history.PreviousStatus);
+        Assert.Equal("NO_SHOW", history.NewStatus);
+        Assert.Equal(adminId, history.UserId);
+
+        var outbox = await dbContext.ReservationEventOutbox
+            .SingleAsync(o => o.AggregateId == reservationId && o.EventType == "ReservationNoShow");
+        Assert.Equal("PENDING", outbox.Status);
+        using var eventPayload = JsonDocument.Parse(outbox.Payload);
+        Assert.Equal(reservationId, eventPayload.RootElement.GetProperty("reservationId").GetGuid());
+        Assert.Equal("NO_SHOW", eventPayload.RootElement.GetProperty("status").GetString());
+    }
+
+    [Fact]
+    public async Task Client_CannotMarkNoShow_ReturnsForbidden()
+    {
+        var clientUserId = Guid.NewGuid();
+        var setup = await CreateReservationSetupAsync();
+        var reservationId = await CreateReservationInDbAsync(setup, clientUserId);
+
+        using var request = NoShowRequest(reservationId, "client", clientUserId);
+        using var response = await _client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task TenantAdmin_CannotMarkNoShowInOtherTenant_ReturnsForbidden()
+    {
+        var clientUserId = Guid.NewGuid();
+        var setup = await CreateReservationSetupAsync();
+        var reservationId = await CreateReservationInDbAsync(setup, clientUserId);
+
+        using var request = NoShowRequest(reservationId, "tenant_admin", Guid.NewGuid(), Guid.NewGuid());
+        using var response = await _client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task NoShow_AlreadyNoShowReservation_ReturnsConflict()
+    {
+        var clientUserId = Guid.NewGuid();
+        var setup = await CreateReservationSetupAsync();
+        var reservationId = await CreateReservationInDbAsync(setup, clientUserId, status: "NO_SHOW");
+
+        using var request = NoShowRequest(reservationId, "tenant_admin", Guid.NewGuid(), setup.TenantId);
+        using var response = await _client.SendAsync(request);
+        using var payload = await response.Content.ReadFromJsonAsync<JsonDocument>();
+
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        Assert.Equal("RESERVATION_NOT_NO_SHOWABLE", payload!.RootElement.GetProperty("error").GetProperty("code").GetString());
+    }
+
+    [Fact]
+    public async Task NoShow_CancelledReservation_ReturnsConflict()
+    {
+        var clientUserId = Guid.NewGuid();
+        var setup = await CreateReservationSetupAsync();
+        var reservationId = await CreateReservationInDbAsync(setup, clientUserId, status: "CANCELLED");
+
+        using var request = NoShowRequest(reservationId, "tenant_admin", Guid.NewGuid(), setup.TenantId);
+        using var response = await _client.SendAsync(request);
+        using var payload = await response.Content.ReadFromJsonAsync<JsonDocument>();
+
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        Assert.Equal("RESERVATION_NOT_NO_SHOWABLE", payload!.RootElement.GetProperty("error").GetProperty("code").GetString());
+    }
+
+    [Fact]
+    public async Task NoShow_NonExistentReservation_ReturnsNotFound()
+    {
+        using var request = NoShowRequest(Guid.NewGuid(), "tenant_admin", Guid.NewGuid(), Guid.NewGuid());
+        using var response = await _client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Fact]
     public async Task OpenApi_ContainsReservationCreationEndpoint()
     {
         using var response = await _client.GetAsync("/swagger/v1/swagger.json");
@@ -227,6 +542,12 @@ public sealed class ReservationsEndpointTests(BookingApiFactory factory)
         var paths = payload!.RootElement.GetProperty("paths");
         Assert.True(paths.TryGetProperty("/reservations", out var reservations));
         Assert.True(reservations.TryGetProperty("post", out _));
+        Assert.True(paths.TryGetProperty("/reservations/{reservationId}/cancel", out var cancel));
+        Assert.True(cancel.TryGetProperty("patch", out _));
+        Assert.True(paths.TryGetProperty("/reservations/{reservationId}/attend", out var attend));
+        Assert.True(attend.TryGetProperty("patch", out _));
+        Assert.True(paths.TryGetProperty("/reservations/{reservationId}/no-show", out var noShow));
+        Assert.True(noShow.TryGetProperty("patch", out _));
     }
 
     private async Task<ReservationSetup> CreateReservationSetupAsync()
@@ -366,6 +687,86 @@ public sealed class ReservationsEndpointTests(BookingApiFactory factory)
         request.Headers.Add("X-Test-User-Id", (userId ?? Guid.NewGuid()).ToString());
         request.Content = JsonContent.Create(body);
         return request;
+    }
+
+    private static HttpRequestMessage CancelRequest(
+        Guid reservationId,
+        string role,
+        Guid userId,
+        string? reason = null,
+        Guid? tenantId = null)
+    {
+        var request = new HttpRequestMessage(
+            HttpMethod.Patch,
+            $"/reservations/{reservationId}/cancel");
+        request.Headers.Add("X-Test-Role", role);
+        request.Headers.Add("X-Test-User-Id", userId.ToString());
+        if (tenantId.HasValue)
+            request.Headers.Add("X-Test-Tenant-Id", tenantId.Value.ToString());
+        request.Content = JsonContent.Create(new { reason });
+        return request;
+    }
+
+    private static HttpRequestMessage NoShowRequest(
+        Guid reservationId,
+        string role,
+        Guid userId,
+        Guid? tenantId = null)
+    {
+        var request = new HttpRequestMessage(
+            HttpMethod.Patch,
+            $"/reservations/{reservationId}/no-show");
+        request.Headers.Add("X-Test-Role", role);
+        request.Headers.Add("X-Test-User-Id", userId.ToString());
+        if (tenantId.HasValue)
+            request.Headers.Add("X-Test-Tenant-Id", tenantId.Value.ToString());
+        return request;
+    }
+
+    private static HttpRequestMessage AttendRequest(
+        Guid reservationId,
+        string role,
+        Guid userId,
+        Guid? tenantId = null)
+    {
+        var request = new HttpRequestMessage(
+            HttpMethod.Patch,
+            $"/reservations/{reservationId}/attend");
+        request.Headers.Add("X-Test-Role", role);
+        request.Headers.Add("X-Test-User-Id", userId.ToString());
+        if (tenantId.HasValue)
+            request.Headers.Add("X-Test-Tenant-Id", tenantId.Value.ToString());
+        return request;
+    }
+
+    private async Task<Guid> CreateReservationInDbAsync(
+        ReservationSetup setup,
+        Guid clientUserId,
+        string status = "CONFIRMED")
+    {
+        await using var scope = _factory.Services.CreateAsyncScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<BookingDbContext>();
+        var now = DateTimeOffset.UtcNow;
+        var startAt = now.AddDays(9).ToUniversalTime();
+        var reservation = new Reservation
+        {
+            ReservationId = Guid.NewGuid(),
+            TenantId = setup.TenantId,
+            BranchId = setup.BranchId,
+            ClientUserId = clientUserId,
+            ServiceId = setup.ServiceId,
+            ResourceId = setup.ResourceId,
+            CreatedByUserId = clientUserId,
+            StartAt = startAt,
+            EndAt = startAt.AddMinutes(30),
+            Status = status,
+            ChannelOrigin = "web",
+            CreatedAt = now,
+            UpdatedAt = now
+        };
+        dbContext.Reservations.Add(reservation);
+        await dbContext.SaveChangesAsync();
+        return reservation.ReservationId;
     }
 
     private static DateOnly FutureDate() =>

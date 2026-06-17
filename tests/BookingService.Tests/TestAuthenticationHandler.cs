@@ -38,6 +38,11 @@ public sealed class TestAuthenticationHandler(
             claims.Add(new Claim("tenant_id", tenantId.ToString()));
         }
 
+        if (Request.Headers.TryGetValue("X-Test-Branch-Id", out var branchId))
+        {
+            claims.Add(new Claim("branch_id", branchId.ToString()));
+        }
+
         var identity = new ClaimsIdentity(claims, SchemeName);
         var principal = new ClaimsPrincipal(identity);
         var ticket = new AuthenticationTicket(principal, SchemeName);

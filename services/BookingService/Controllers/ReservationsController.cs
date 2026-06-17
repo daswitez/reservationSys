@@ -8,6 +8,7 @@ using BookingService.Domain;
 using BookingService.Features.Reservations;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc.ModelBinding;
 using Microsoft.EntityFrameworkCore;
 using Npgsql;
 
@@ -271,6 +272,407 @@ public sealed class ReservationsController(BookingDbContext dbContext) : Control
             : Ok(ApiResponse<ReservationResponse>.Ok(ToResponse(reservation)));
     }
 
+    /// <summary>Cancela una reserva confirmada. El cliente solo puede cancelar la propia.</summary>
+    [Authorize(Policy = "AuthenticatedUser")]
+    [HttpPatch("reservations/{reservationId:guid}/cancel")]
+    [ProducesResponseType(typeof(ApiResponse<ReservationResponse>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ApiResponse<object>), StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(typeof(ApiResponse<object>), StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(typeof(ApiResponse<object>), StatusCodes.Status404NotFound)]
+    [ProducesResponseType(typeof(ApiResponse<object>), StatusCodes.Status409Conflict)]
+    public async Task<IActionResult> Cancel(
+        Guid reservationId,
+        [FromBody(EmptyBodyBehavior = EmptyBodyBehavior.Allow)] CancelReservationRequest? request,
+        CancellationToken cancellationToken)
+    {
+        if (!TryGetUserId(out var userId))
+        {
+            return Unauthorized(ApiResponse<object>.Failure(
+                "UNAUTHORIZED",
+                "El JWT no contiene user_id valido."));
+        }
+
+        var reservation = await dbContext.Reservations
+            .SingleOrDefaultAsync(r => r.ReservationId == reservationId, cancellationToken);
+
+        if (reservation is null)
+        {
+            return NotFound(ApiResponse<object>.Failure(
+                "RESERVATION_NOT_FOUND",
+                $"No existe la reserva '{reservationId}'."));
+        }
+
+        if (User.IsInRole("client") && reservation.ClientUserId != userId)
+        {
+            return Forbid();
+        }
+
+        if (User.IsInRole("tenant_admin"))
+        {
+            var tenantIdClaim = User.FindFirstValue("tenant_id");
+            if (!Guid.TryParse(tenantIdClaim, out var tenantId) || reservation.TenantId != tenantId)
+                return Forbid();
+        }
+
+        if (reservation.Status != "CONFIRMED")
+        {
+            return Conflict(ApiResponse<object>.Failure(
+                "RESERVATION_NOT_CANCELLABLE",
+                "Solo se pueden cancelar reservas con estado CONFIRMED."));
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        reservation.Status = "CANCELLED";
+        reservation.UpdatedAt = now;
+
+        dbContext.ReservationHistory.Add(new ReservationHistory
+        {
+            HistoryId = Guid.NewGuid(),
+            TenantId = reservation.TenantId,
+            ReservationId = reservation.ReservationId,
+            UserId = userId,
+            PreviousStatus = "CONFIRMED",
+            NewStatus = "CANCELLED",
+            Action = "CANCELLED",
+            Reason = NormalizeOptional(request?.Reason),
+            CreatedAt = now
+        });
+
+        var eventId = Guid.NewGuid();
+        dbContext.ReservationEventOutbox.Add(new ReservationEventOutbox
+        {
+            EventId = eventId,
+            TenantId = reservation.TenantId,
+            EventType = "ReservationCancelled",
+            AggregateId = reservation.ReservationId,
+            Payload = BuildReservationCancelledPayload(eventId, reservation, now),
+            Status = "PENDING",
+            Attempts = 0,
+            CreatedAt = now
+        });
+
+        await dbContext.SaveChangesAsync(cancellationToken);
+
+        return Ok(ApiResponse<ReservationResponse>.Ok(ToResponse(reservation)));
+    }
+
+    /// <summary>Marca una reserva como atendida. Solo usuarios internos (tenant_admin, branch_admin, super_admin).</summary>
+    [Authorize(Policy = "AuthenticatedUser")]
+    [HttpPatch("reservations/{reservationId:guid}/attend")]
+    [ProducesResponseType(typeof(ApiResponse<ReservationResponse>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ApiResponse<object>), StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(typeof(ApiResponse<object>), StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(typeof(ApiResponse<object>), StatusCodes.Status404NotFound)]
+    [ProducesResponseType(typeof(ApiResponse<object>), StatusCodes.Status409Conflict)]
+    public async Task<IActionResult> Attend(Guid reservationId, CancellationToken cancellationToken)
+    {
+        if (!TryGetUserId(out var userId))
+        {
+            return Unauthorized(ApiResponse<object>.Failure(
+                "UNAUTHORIZED",
+                "El JWT no contiene user_id valido."));
+        }
+
+        if (User.IsInRole("client"))
+        {
+            return Forbid();
+        }
+
+        var reservation = await dbContext.Reservations
+            .SingleOrDefaultAsync(r => r.ReservationId == reservationId, cancellationToken);
+
+        if (reservation is null)
+        {
+            return NotFound(ApiResponse<object>.Failure(
+                "RESERVATION_NOT_FOUND",
+                $"No existe la reserva '{reservationId}'."));
+        }
+
+        if (User.IsInRole("tenant_admin") || User.IsInRole("branch_admin"))
+        {
+            var tenantIdClaim = User.FindFirstValue("tenant_id");
+            if (!Guid.TryParse(tenantIdClaim, out var tenantId) || reservation.TenantId != tenantId)
+                return Forbid();
+        }
+
+        if (reservation.Status != "CONFIRMED")
+        {
+            return Conflict(ApiResponse<object>.Failure(
+                "RESERVATION_NOT_ATTENDABLE",
+                "Solo se pueden marcar como atendidas reservas con estado CONFIRMED."));
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        reservation.Status = "ATTENDED";
+        reservation.UpdatedAt = now;
+
+        dbContext.ReservationHistory.Add(new ReservationHistory
+        {
+            HistoryId = Guid.NewGuid(),
+            TenantId = reservation.TenantId,
+            ReservationId = reservation.ReservationId,
+            UserId = userId,
+            PreviousStatus = "CONFIRMED",
+            NewStatus = "ATTENDED",
+            Action = "ATTENDED",
+            CreatedAt = now
+        });
+
+        var eventId = Guid.NewGuid();
+        dbContext.ReservationEventOutbox.Add(new ReservationEventOutbox
+        {
+            EventId = eventId,
+            TenantId = reservation.TenantId,
+            EventType = "ReservationAttended",
+            AggregateId = reservation.ReservationId,
+            Payload = BuildReservationAttendedPayload(eventId, reservation, now),
+            Status = "PENDING",
+            Attempts = 0,
+            CreatedAt = now
+        });
+
+        await dbContext.SaveChangesAsync(cancellationToken);
+
+        return Ok(ApiResponse<ReservationResponse>.Ok(ToResponse(reservation)));
+    }
+
+    /// <summary>Marca que el cliente no asistió. Solo usuarios internos (tenant_admin, branch_admin, super_admin).</summary>
+    [Authorize(Policy = "AuthenticatedUser")]
+    [HttpPatch("reservations/{reservationId:guid}/no-show")]
+    [ProducesResponseType(typeof(ApiResponse<ReservationResponse>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ApiResponse<object>), StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(typeof(ApiResponse<object>), StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(typeof(ApiResponse<object>), StatusCodes.Status404NotFound)]
+    [ProducesResponseType(typeof(ApiResponse<object>), StatusCodes.Status409Conflict)]
+    public async Task<IActionResult> NoShow(Guid reservationId, CancellationToken cancellationToken)
+    {
+        if (!TryGetUserId(out var userId))
+        {
+            return Unauthorized(ApiResponse<object>.Failure(
+                "UNAUTHORIZED",
+                "El JWT no contiene user_id valido."));
+        }
+
+        if (User.IsInRole("client"))
+        {
+            return Forbid();
+        }
+
+        var reservation = await dbContext.Reservations
+            .SingleOrDefaultAsync(r => r.ReservationId == reservationId, cancellationToken);
+
+        if (reservation is null)
+        {
+            return NotFound(ApiResponse<object>.Failure(
+                "RESERVATION_NOT_FOUND",
+                $"No existe la reserva '{reservationId}'."));
+        }
+
+        if (User.IsInRole("tenant_admin") || User.IsInRole("branch_admin"))
+        {
+            var tenantIdClaim = User.FindFirstValue("tenant_id");
+            if (!Guid.TryParse(tenantIdClaim, out var tenantId) || reservation.TenantId != tenantId)
+                return Forbid();
+        }
+
+        if (reservation.Status != "CONFIRMED")
+        {
+            return Conflict(ApiResponse<object>.Failure(
+                "RESERVATION_NOT_NO_SHOWABLE",
+                "Solo se pueden marcar como no-show reservas con estado CONFIRMED."));
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        reservation.Status = "NO_SHOW";
+        reservation.UpdatedAt = now;
+
+        dbContext.ReservationHistory.Add(new ReservationHistory
+        {
+            HistoryId = Guid.NewGuid(),
+            TenantId = reservation.TenantId,
+            ReservationId = reservation.ReservationId,
+            UserId = userId,
+            PreviousStatus = "CONFIRMED",
+            NewStatus = "NO_SHOW",
+            Action = "NO_SHOW",
+            CreatedAt = now
+        });
+
+        var eventId = Guid.NewGuid();
+        dbContext.ReservationEventOutbox.Add(new ReservationEventOutbox
+        {
+            EventId = eventId,
+            TenantId = reservation.TenantId,
+            EventType = "ReservationNoShow",
+            AggregateId = reservation.ReservationId,
+            Payload = BuildReservationNoShowPayload(eventId, reservation, now),
+            Status = "PENDING",
+            Attempts = 0,
+            CreatedAt = now
+        });
+
+        await dbContext.SaveChangesAsync(cancellationToken);
+
+        return Ok(ApiResponse<ReservationResponse>.Ok(ToResponse(reservation)));
+    }
+
+    /// <summary>
+    /// Busca reservas con filtros opcionales. Solo usuarios internos.
+    /// tenant_admin ve su tenant; branch_admin ve su sucursal (claim branch_id).
+    /// Máximo 200 resultados, ordenados por StartAt descendente.
+    /// </summary>
+    [Authorize(Policy = "AuthenticatedUser")]
+    [HttpGet("admin/reservations")]
+    [ProducesResponseType(typeof(ApiResponse<IReadOnlyList<ReservationSearchItem>>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ApiResponse<object>), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(ApiResponse<object>), StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(typeof(ApiResponse<object>), StatusCodes.Status403Forbidden)]
+    public async Task<IActionResult> Search(
+        [FromQuery] Guid? clientUserId = null,
+        [FromQuery] Guid? branchId = null,
+        [FromQuery] Guid? serviceId = null,
+        [FromQuery] Guid? resourceId = null,
+        [FromQuery] string? status = null,
+        [FromQuery] string? dateFrom = null,
+        [FromQuery] string? dateTo = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (!TryGetUserId(out _))
+        {
+            return Unauthorized(ApiResponse<object>.Failure(
+                "UNAUTHORIZED",
+                "El JWT no contiene user_id valido."));
+        }
+
+        if (User.IsInRole("client"))
+        {
+            return Forbid();
+        }
+
+        DateOnly? parsedDateFrom = null;
+        DateOnly? parsedDateTo = null;
+
+        if (!string.IsNullOrWhiteSpace(dateFrom) &&
+            !DateOnly.TryParseExact(dateFrom, "yyyy-MM-dd", CultureInfo.InvariantCulture,
+                DateTimeStyles.None, out var df))
+        {
+            return ValidationError("dateFrom debe tener formato YYYY-MM-DD.");
+        }
+        else if (!string.IsNullOrWhiteSpace(dateFrom))
+        {
+            parsedDateFrom = DateOnly.ParseExact(dateFrom, "yyyy-MM-dd", CultureInfo.InvariantCulture);
+        }
+
+        if (!string.IsNullOrWhiteSpace(dateTo) &&
+            !DateOnly.TryParseExact(dateTo, "yyyy-MM-dd", CultureInfo.InvariantCulture,
+                DateTimeStyles.None, out var dt))
+        {
+            return ValidationError("dateTo debe tener formato YYYY-MM-DD.");
+        }
+        else if (!string.IsNullOrWhiteSpace(dateTo))
+        {
+            parsedDateTo = DateOnly.ParseExact(dateTo, "yyyy-MM-dd", CultureInfo.InvariantCulture);
+        }
+
+        var query = dbContext.Reservations.AsNoTracking();
+
+        if (!User.IsInRole("super_admin"))
+        {
+            var tenantIdClaim = User.FindFirstValue("tenant_id");
+            if (!Guid.TryParse(tenantIdClaim, out var tenantId))
+            {
+                return Unauthorized(ApiResponse<object>.Failure(
+                    "UNAUTHORIZED",
+                    "El JWT no contiene tenant_id valido."));
+            }
+            query = query.Where(r => r.TenantId == tenantId);
+        }
+
+        if (User.IsInRole("branch_admin"))
+        {
+            var claimBranchId = User.FindFirstValue("branch_id");
+            if (!Guid.TryParse(claimBranchId, out var assignedBranchId))
+            {
+                return Unauthorized(ApiResponse<object>.Failure(
+                    "UNAUTHORIZED",
+                    "El JWT no contiene branch_id valido."));
+            }
+            query = query.Where(r => r.BranchId == assignedBranchId);
+        }
+
+        if (clientUserId.HasValue)
+            query = query.Where(r => r.ClientUserId == clientUserId.Value);
+
+        if (branchId.HasValue)
+            query = query.Where(r => r.BranchId == branchId.Value);
+
+        if (serviceId.HasValue)
+            query = query.Where(r => r.ServiceId == serviceId.Value);
+
+        if (resourceId.HasValue)
+            query = query.Where(r => r.ResourceId == resourceId.Value);
+
+        if (!string.IsNullOrWhiteSpace(status))
+            query = query.Where(r => r.Status == status.Trim().ToUpperInvariant());
+
+        if (parsedDateFrom.HasValue)
+        {
+            var fromUtc = parsedDateFrom.Value.ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc);
+            query = query.Where(r => r.StartAt >= fromUtc);
+        }
+
+        if (parsedDateTo.HasValue)
+        {
+            var toUtc = parsedDateTo.Value.AddDays(1).ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc);
+            query = query.Where(r => r.StartAt < toUtc);
+        }
+
+        var reservations = await query
+            .OrderByDescending(r => r.StartAt)
+            .Take(200)
+            .ToListAsync(cancellationToken);
+
+        var reservationIds = reservations.Select(r => r.ReservationId).ToList();
+        var histories = await dbContext.ReservationHistory
+            .AsNoTracking()
+            .Where(h => reservationIds.Contains(h.ReservationId))
+            .OrderBy(h => h.CreatedAt)
+            .ToListAsync(cancellationToken);
+
+        var historiesById = histories
+            .GroupBy(h => h.ReservationId)
+            .ToDictionary(g => g.Key, g => g.ToList());
+
+        var items = reservations.Select(r =>
+        {
+            var historyEntries = historiesById.TryGetValue(r.ReservationId, out var entries)
+                ? entries.Select(e => new ReservationHistoryItem(
+                    e.Action,
+                    e.PreviousStatus,
+                    e.NewStatus,
+                    e.Reason,
+                    e.UserId,
+                    e.CreatedAt)).ToList()
+                : (IReadOnlyList<ReservationHistoryItem>)[];
+
+            return new ReservationSearchItem(
+                r.ReservationId,
+                r.TenantId,
+                r.BranchId,
+                r.ServiceId,
+                r.ResourceId,
+                r.ClientUserId,
+                r.Status,
+                r.StartAt,
+                r.EndAt,
+                r.Notes,
+                r.CreatedAt,
+                historyEntries);
+        }).ToList();
+
+        return Ok(ApiResponse<IReadOnlyList<ReservationSearchItem>>.Ok(items));
+    }
+
     private async Task<List<CompatibleResource>> GetCompatibleResourcesAsync(
         Guid tenantId,
         Guid branchId,
@@ -420,6 +822,72 @@ public sealed class ReservationsController(BookingDbContext dbContext) : Control
     private static bool IsSlotConflict(DbUpdateException exception) =>
         exception.InnerException is PostgresException postgresException
         && postgresException.SqlState is PostgresErrorCodes.ExclusionViolation or PostgresErrorCodes.UniqueViolation;
+
+    private static string BuildReservationCancelledPayload(
+        Guid eventId,
+        Reservation reservation,
+        DateTimeOffset occurredAt)
+    {
+        var payload = new
+        {
+            eventId,
+            eventType = "ReservationCancelled",
+            occurredAt = occurredAt.ToUniversalTime(),
+            reservation.TenantId,
+            reservation.BranchId,
+            reservation.ServiceId,
+            reservation.ResourceId,
+            reservation.ReservationId,
+            reservation.StartAt,
+            reservation.EndAt,
+            reservation.Status
+        };
+        return JsonSerializer.Serialize(payload, JsonOptions);
+    }
+
+    private static string BuildReservationAttendedPayload(
+        Guid eventId,
+        Reservation reservation,
+        DateTimeOffset occurredAt)
+    {
+        var payload = new
+        {
+            eventId,
+            eventType = "ReservationAttended",
+            occurredAt = occurredAt.ToUniversalTime(),
+            reservation.TenantId,
+            reservation.BranchId,
+            reservation.ServiceId,
+            reservation.ResourceId,
+            reservation.ReservationId,
+            reservation.StartAt,
+            reservation.EndAt,
+            reservation.Status
+        };
+        return JsonSerializer.Serialize(payload, JsonOptions);
+    }
+
+    private static string BuildReservationNoShowPayload(
+        Guid eventId,
+        Reservation reservation,
+        DateTimeOffset occurredAt)
+    {
+        var payload = new
+        {
+            eventId,
+            eventType = "ReservationNoShow",
+            occurredAt = occurredAt.ToUniversalTime(),
+            reservation.TenantId,
+            reservation.BranchId,
+            reservation.ServiceId,
+            reservation.ResourceId,
+            reservation.ReservationId,
+            reservation.StartAt,
+            reservation.EndAt,
+            reservation.Status
+        };
+        return JsonSerializer.Serialize(payload, JsonOptions);
+    }
 
     private static string BuildReservationCreatedPayload(
         Guid eventId,
