@@ -1,4 +1,5 @@
 using System.Security.Claims;
+using System.Text.Json;
 using Cassandra;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -11,6 +12,58 @@ namespace ReportingService.Controllers;
 [Route("reports")]
 public sealed class ReportsController(Cassandra.ISession session) : ControllerBase
 {
+    [HttpPost("/internal/report-events")]
+    [AllowAnonymous]
+    public async Task<IActionResult> IngestReportEvent(
+        [FromBody] JsonElement payload,
+        CancellationToken cancellationToken = default)
+    {
+        if (!TryReadGuid(payload, "eventId", out var eventId) ||
+            !TryReadString(payload, "eventType", out var eventType) ||
+            !TryReadGuid(payload, "tenantId", out var tenantId))
+        {
+            return BadRequest(ApiResponse<object>.Failure(
+                "VALIDATION_ERROR",
+                "eventId, eventType y tenantId son requeridos."));
+        }
+
+        if (!IsSupportedReportEvent(eventType))
+        {
+            return BadRequest(ApiResponse<object>.Failure(
+                "UNSUPPORTED_EVENT",
+                $"El evento '{eventType}' no es soportado por Reporting."));
+        }
+
+        try
+        {
+            ValidateReportEventPayload(eventType, payload);
+        }
+        catch (InvalidOperationException exception)
+        {
+            return BadRequest(ApiResponse<object>.Failure(
+                "VALIDATION_ERROR",
+                exception.Message));
+        }
+
+        var claimed = await TryClaimEventAsync(eventId, tenantId, eventType);
+        if (!claimed)
+        {
+            return Ok(ApiResponse<object>.Ok(new
+            {
+                status = "DUPLICATE",
+                eventId
+            }));
+        }
+
+        await ApplyReportEventAsync(eventType, payload);
+
+        return Ok(ApiResponse<object>.Ok(new
+        {
+            status = "PROCESSED",
+            eventId
+        }));
+    }
+
     [HttpGet("daily-summary")]
     [Authorize(Policy = "AuthenticatedUser")]
     public async Task<IActionResult> GetDailySummary(
@@ -590,5 +643,499 @@ public sealed class ReportsController(Cassandra.ISession session) : ControllerBa
             row.GetValue<int>("total_reserved_minutes"),
             row.IsNull("updated_at") ? null : row.GetValue<DateTimeOffset>("updated_at"),
             "OK");
+    }
+
+    private static bool IsSupportedReportEvent(string eventType) =>
+        eventType is "ReservationCreated"
+            or "ReservationCancelled"
+            or "ReservationAttended"
+            or "ReservationNoShow"
+            or "ResourceBlockCreated"
+            or "ResourceBlockCancelled";
+
+    private async Task<bool> TryClaimEventAsync(Guid eventId, Guid tenantId, string eventType)
+    {
+        const string cql = """
+            INSERT INTO report_processed_events (event_id, tenant_id, event_type, processed_at)
+            VALUES (?, ?, ?, ?)
+            IF NOT EXISTS
+            """;
+
+        var rowSet = await session.ExecuteAsync(new SimpleStatement(
+            cql,
+            eventId,
+            tenantId,
+            eventType,
+            DateTimeOffset.UtcNow));
+        var row = rowSet.FirstOrDefault();
+        return row is not null && row.GetValue<bool>("[applied]");
+    }
+
+    private async Task ApplyReportEventAsync(string eventType, JsonElement payload)
+    {
+        switch (eventType)
+        {
+            case "ReservationCreated":
+                await ApplyReservationCreatedAsync(payload);
+                break;
+            case "ReservationCancelled":
+                await ApplyReservationCancelledAsync(payload);
+                break;
+            case "ReservationAttended":
+                await ApplyReservationAttendedAsync(payload);
+                break;
+            case "ReservationNoShow":
+                await ApplyReservationNoShowAsync(payload);
+                break;
+            case "ResourceBlockCreated":
+                await ApplyResourceBlockDeltaAsync(payload, 1);
+                break;
+            case "ResourceBlockCancelled":
+                await ApplyResourceBlockDeltaAsync(payload, -1);
+                break;
+        }
+    }
+
+    private static void ValidateReportEventPayload(string eventType, JsonElement payload)
+    {
+        _ = RequiredGuid(payload, "tenantId");
+        _ = RequiredGuid(payload, "branchId");
+        _ = RequiredGuid(payload, "resourceId");
+        _ = RequiredDateTimeOffset(payload, "startAt");
+        _ = GetDurationMinutes(payload);
+
+        if (eventType.StartsWith("Reservation", StringComparison.Ordinal))
+        {
+            _ = RequiredGuid(payload, "serviceId");
+            _ = RequiredGuid(payload, "reservationId");
+        }
+        else
+        {
+            _ = RequiredGuid(payload, "blockId");
+        }
+    }
+
+    private async Task ApplyReservationCreatedAsync(JsonElement payload)
+    {
+        var tenantId = RequiredGuid(payload, "tenantId");
+        var branchId = RequiredGuid(payload, "branchId");
+        var serviceId = RequiredGuid(payload, "serviceId");
+        var resourceId = RequiredGuid(payload, "resourceId");
+        var startAt = RequiredDateTimeOffset(payload, "startAt");
+        var durationMinutes = GetDurationMinutes(payload);
+        var reportDate = ToCassandraDate(startAt);
+        var yearMonth = ToYearMonth(startAt);
+        var updatedAt = DateTimeOffset.UtcNow;
+
+        await UpsertTenantDailyAsync(
+            tenantId, reportDate, 1, 1, 0, 0, 0, 0, durationMinutes, updatedAt);
+        await UpsertBranchDailyAsync(
+            tenantId, branchId, reportDate, OptionalString(payload, "branchName"),
+            1, 1, 0, 0, 0, durationMinutes, updatedAt);
+        await UpsertServiceMonthAsync(
+            tenantId, yearMonth, serviceId, OptionalString(payload, "serviceName"),
+            1, 0, 0, 0, durationMinutes, updatedAt);
+        await UpsertResourceOccupancyAsync(
+            tenantId, branchId, resourceId, reportDate,
+            OptionalString(payload, "resourceName"), OptionalString(payload, "resourceType"),
+            1, 0, 0, 0, durationMinutes, 0, updatedAt);
+        await UpsertPeakHourAsync(
+            tenantId, branchId, reportDate, startAt.UtcDateTime.Hour,
+            OptionalString(payload, "branchName"), 1, 0, 0, updatedAt);
+    }
+
+    private async Task ApplyReservationCancelledAsync(JsonElement payload)
+    {
+        var tenantId = RequiredGuid(payload, "tenantId");
+        var branchId = RequiredGuid(payload, "branchId");
+        var serviceId = RequiredGuid(payload, "serviceId");
+        var resourceId = RequiredGuid(payload, "resourceId");
+        var startAt = RequiredDateTimeOffset(payload, "startAt");
+        var durationMinutes = GetDurationMinutes(payload);
+        var reportDate = ToCassandraDate(startAt);
+        var yearMonth = ToYearMonth(startAt);
+        var updatedAt = DateTimeOffset.UtcNow;
+
+        await UpsertTenantDailyAsync(
+            tenantId, reportDate, 0, -1, 1, 0, 0, 0, -durationMinutes, updatedAt);
+        await UpsertBranchDailyAsync(
+            tenantId, branchId, reportDate, OptionalString(payload, "branchName"),
+            0, -1, 1, 0, 0, -durationMinutes, updatedAt);
+        await UpsertServiceMonthAsync(
+            tenantId, yearMonth, serviceId, OptionalString(payload, "serviceName"),
+            0, 1, 0, 0, -durationMinutes, updatedAt);
+        await UpsertResourceOccupancyAsync(
+            tenantId, branchId, resourceId, reportDate,
+            OptionalString(payload, "resourceName"), OptionalString(payload, "resourceType"),
+            0, 0, 1, 0, -durationMinutes, 0, updatedAt);
+        await UpsertPeakHourAsync(
+            tenantId, branchId, reportDate, startAt.UtcDateTime.Hour,
+            OptionalString(payload, "branchName"), 0, 0, 1, updatedAt);
+    }
+
+    private async Task ApplyReservationAttendedAsync(JsonElement payload)
+    {
+        var tenantId = RequiredGuid(payload, "tenantId");
+        var branchId = RequiredGuid(payload, "branchId");
+        var serviceId = RequiredGuid(payload, "serviceId");
+        var resourceId = RequiredGuid(payload, "resourceId");
+        var startAt = RequiredDateTimeOffset(payload, "startAt");
+        var reportDate = ToCassandraDate(startAt);
+        var yearMonth = ToYearMonth(startAt);
+        var updatedAt = DateTimeOffset.UtcNow;
+
+        await UpsertTenantDailyAsync(
+            tenantId, reportDate, 0, -1, 0, 1, 0, 0, 0, updatedAt);
+        await UpsertBranchDailyAsync(
+            tenantId, branchId, reportDate, OptionalString(payload, "branchName"),
+            0, -1, 0, 1, 0, 0, updatedAt);
+        await UpsertServiceMonthAsync(
+            tenantId, yearMonth, serviceId, OptionalString(payload, "serviceName"),
+            0, 0, 1, 0, 0, updatedAt);
+        await UpsertResourceOccupancyAsync(
+            tenantId, branchId, resourceId, reportDate,
+            OptionalString(payload, "resourceName"), OptionalString(payload, "resourceType"),
+            0, 1, 0, 0, 0, 0, updatedAt);
+        await UpsertPeakHourAsync(
+            tenantId, branchId, reportDate, startAt.UtcDateTime.Hour,
+            OptionalString(payload, "branchName"), 0, 1, 0, updatedAt);
+    }
+
+    private async Task ApplyReservationNoShowAsync(JsonElement payload)
+    {
+        var tenantId = RequiredGuid(payload, "tenantId");
+        var branchId = RequiredGuid(payload, "branchId");
+        var serviceId = RequiredGuid(payload, "serviceId");
+        var resourceId = RequiredGuid(payload, "resourceId");
+        var startAt = RequiredDateTimeOffset(payload, "startAt");
+        var reportDate = ToCassandraDate(startAt);
+        var yearMonth = ToYearMonth(startAt);
+        var updatedAt = DateTimeOffset.UtcNow;
+
+        await UpsertTenantDailyAsync(
+            tenantId, reportDate, 0, -1, 0, 0, 1, 0, 0, updatedAt);
+        await UpsertBranchDailyAsync(
+            tenantId, branchId, reportDate, OptionalString(payload, "branchName"),
+            0, -1, 0, 0, 1, 0, updatedAt);
+        await UpsertServiceMonthAsync(
+            tenantId, yearMonth, serviceId, OptionalString(payload, "serviceName"),
+            0, 0, 0, 1, 0, updatedAt);
+        await UpsertResourceOccupancyAsync(
+            tenantId, branchId, resourceId, reportDate,
+            OptionalString(payload, "resourceName"), OptionalString(payload, "resourceType"),
+            0, 0, 0, 1, 0, 0, updatedAt);
+    }
+
+    private async Task ApplyResourceBlockDeltaAsync(JsonElement payload, int direction)
+    {
+        var tenantId = RequiredGuid(payload, "tenantId");
+        var branchId = RequiredGuid(payload, "branchId");
+        var resourceId = RequiredGuid(payload, "resourceId");
+        var startAt = RequiredDateTimeOffset(payload, "startAt");
+        var durationMinutes = GetDurationMinutes(payload) * direction;
+        var reportDate = ToCassandraDate(startAt);
+        var updatedAt = DateTimeOffset.UtcNow;
+
+        await UpsertTenantDailyAsync(
+            tenantId, reportDate, 0, 0, 0, 0, 0, durationMinutes, 0, updatedAt);
+        await UpsertResourceOccupancyAsync(
+            tenantId, branchId, resourceId, reportDate,
+            OptionalString(payload, "resourceName"), OptionalString(payload, "resourceType"),
+            0, 0, 0, 0, 0, durationMinutes, updatedAt);
+    }
+
+    private async Task UpsertTenantDailyAsync(
+        Guid tenantId,
+        LocalDate reportDate,
+        int createdDelta,
+        int confirmedDelta,
+        int cancelledDelta,
+        int attendedDelta,
+        int noShowDelta,
+        int blockedMinutesDelta,
+        int reservedMinutesDelta,
+        DateTimeOffset updatedAt)
+    {
+        const string selectCql = """
+            SELECT total_created, total_confirmed, total_cancelled, total_attended,
+                   total_no_show, total_blocked_minutes, total_reserved_minutes
+            FROM report_daily_summary_by_tenant
+            WHERE tenant_id = ? AND report_date = ?
+            """;
+        var current = (await session.ExecuteAsync(new SimpleStatement(selectCql, tenantId, reportDate)))
+            .FirstOrDefault();
+
+        const string insertCql = """
+            INSERT INTO report_daily_summary_by_tenant
+              (tenant_id, report_date, total_created, total_confirmed, total_cancelled,
+               total_attended, total_no_show, total_blocked_minutes, total_reserved_minutes, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """;
+        await session.ExecuteAsync(new SimpleStatement(
+            insertCql,
+            tenantId,
+            reportDate,
+            Add(current, "total_created", createdDelta),
+            Add(current, "total_confirmed", confirmedDelta),
+            Add(current, "total_cancelled", cancelledDelta),
+            Add(current, "total_attended", attendedDelta),
+            Add(current, "total_no_show", noShowDelta),
+            Add(current, "total_blocked_minutes", blockedMinutesDelta),
+            Add(current, "total_reserved_minutes", reservedMinutesDelta),
+            updatedAt));
+    }
+
+    private async Task UpsertBranchDailyAsync(
+        Guid tenantId,
+        Guid branchId,
+        LocalDate reportDate,
+        string? branchName,
+        int createdDelta,
+        int confirmedDelta,
+        int cancelledDelta,
+        int attendedDelta,
+        int noShowDelta,
+        int reservedMinutesDelta,
+        DateTimeOffset updatedAt)
+    {
+        const string selectCql = """
+            SELECT branch_name, total_created, total_confirmed, total_cancelled, total_attended,
+                   total_no_show, total_reserved_minutes
+            FROM report_daily_summary_by_branch
+            WHERE tenant_id = ? AND branch_id = ? AND report_date = ?
+            """;
+        var current = (await session.ExecuteAsync(new SimpleStatement(selectCql, tenantId, branchId, reportDate)))
+            .FirstOrDefault();
+        var resolvedBranchName = branchName ?? OptionalRowString(current, "branch_name") ?? string.Empty;
+
+        const string insertCql = """
+            INSERT INTO report_daily_summary_by_branch
+              (tenant_id, branch_id, report_date, branch_name, total_created, total_confirmed,
+               total_cancelled, total_attended, total_no_show, total_reserved_minutes, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """;
+        await session.ExecuteAsync(new SimpleStatement(
+            insertCql,
+            tenantId,
+            branchId,
+            reportDate,
+            resolvedBranchName,
+            Add(current, "total_created", createdDelta),
+            Add(current, "total_confirmed", confirmedDelta),
+            Add(current, "total_cancelled", cancelledDelta),
+            Add(current, "total_attended", attendedDelta),
+            Add(current, "total_no_show", noShowDelta),
+            Add(current, "total_reserved_minutes", reservedMinutesDelta),
+            updatedAt));
+    }
+
+    private async Task UpsertServiceMonthAsync(
+        Guid tenantId,
+        string yearMonth,
+        Guid serviceId,
+        string? serviceName,
+        int createdDelta,
+        int cancelledDelta,
+        int attendedDelta,
+        int noShowDelta,
+        int reservedMinutesDelta,
+        DateTimeOffset updatedAt)
+    {
+        const string selectCql = """
+            SELECT service_name, total_created, total_cancelled, total_attended,
+                   total_no_show, total_reserved_minutes
+            FROM report_service_summary_by_month
+            WHERE tenant_id = ? AND year_month = ? AND service_id = ?
+            """;
+        var current = (await session.ExecuteAsync(new SimpleStatement(selectCql, tenantId, yearMonth, serviceId)))
+            .FirstOrDefault();
+        var resolvedServiceName = serviceName ?? OptionalRowString(current, "service_name") ?? string.Empty;
+
+        const string insertCql = """
+            INSERT INTO report_service_summary_by_month
+              (tenant_id, year_month, service_id, service_name, total_created, total_cancelled,
+               total_attended, total_no_show, total_reserved_minutes, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """;
+        await session.ExecuteAsync(new SimpleStatement(
+            insertCql,
+            tenantId,
+            yearMonth,
+            serviceId,
+            resolvedServiceName,
+            Add(current, "total_created", createdDelta),
+            Add(current, "total_cancelled", cancelledDelta),
+            Add(current, "total_attended", attendedDelta),
+            Add(current, "total_no_show", noShowDelta),
+            Add(current, "total_reserved_minutes", reservedMinutesDelta),
+            updatedAt));
+    }
+
+    private async Task UpsertResourceOccupancyAsync(
+        Guid tenantId,
+        Guid branchId,
+        Guid resourceId,
+        LocalDate reportDate,
+        string? resourceName,
+        string? resourceType,
+        int reservationsDelta,
+        int attendedDelta,
+        int cancelledDelta,
+        int noShowDelta,
+        int reservedMinutesDelta,
+        int blockedMinutesDelta,
+        DateTimeOffset updatedAt)
+    {
+        const string selectCql = """
+            SELECT resource_name, resource_type, total_reservations, total_attended,
+                   total_cancelled, total_no_show, reserved_minutes, blocked_minutes
+            FROM report_resource_occupancy_by_day
+            WHERE tenant_id = ? AND branch_id = ? AND report_date = ? AND resource_id = ?
+            """;
+        var current = (await session.ExecuteAsync(new SimpleStatement(
+                selectCql, tenantId, branchId, reportDate, resourceId)))
+            .FirstOrDefault();
+        var resolvedResourceName = resourceName ?? OptionalRowString(current, "resource_name") ?? string.Empty;
+        var resolvedResourceType = resourceType ?? OptionalRowString(current, "resource_type") ?? string.Empty;
+
+        const string insertCql = """
+            INSERT INTO report_resource_occupancy_by_day
+              (tenant_id, branch_id, resource_id, report_date,
+               resource_name, resource_type,
+               total_reservations, total_attended, total_cancelled, total_no_show,
+               reserved_minutes, blocked_minutes, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """;
+        await session.ExecuteAsync(new SimpleStatement(
+            insertCql,
+            tenantId,
+            branchId,
+            resourceId,
+            reportDate,
+            resolvedResourceName,
+            resolvedResourceType,
+            Add(current, "total_reservations", reservationsDelta),
+            Add(current, "total_attended", attendedDelta),
+            Add(current, "total_cancelled", cancelledDelta),
+            Add(current, "total_no_show", noShowDelta),
+            Add(current, "reserved_minutes", reservedMinutesDelta),
+            Add(current, "blocked_minutes", blockedMinutesDelta),
+            updatedAt));
+    }
+
+    private async Task UpsertPeakHourAsync(
+        Guid tenantId,
+        Guid branchId,
+        LocalDate reportDate,
+        int hourOfDay,
+        string? branchName,
+        int createdDelta,
+        int attendedDelta,
+        int cancelledDelta,
+        DateTimeOffset updatedAt)
+    {
+        const string selectCql = """
+            SELECT branch_name, total_created, total_attended, total_cancelled
+            FROM report_peak_hours_by_branch_day
+            WHERE tenant_id = ? AND branch_id = ? AND report_date = ? AND hour_of_day = ?
+            """;
+        var current = (await session.ExecuteAsync(new SimpleStatement(
+                selectCql, tenantId, branchId, reportDate, hourOfDay)))
+            .FirstOrDefault();
+        var resolvedBranchName = branchName ?? OptionalRowString(current, "branch_name") ?? string.Empty;
+
+        const string insertCql = """
+            INSERT INTO report_peak_hours_by_branch_day
+              (tenant_id, branch_id, report_date, hour_of_day, branch_name,
+               total_created, total_attended, total_cancelled, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """;
+        await session.ExecuteAsync(new SimpleStatement(
+            insertCql,
+            tenantId,
+            branchId,
+            reportDate,
+            hourOfDay,
+            resolvedBranchName,
+            Add(current, "total_created", createdDelta),
+            Add(current, "total_attended", attendedDelta),
+            Add(current, "total_cancelled", cancelledDelta),
+            updatedAt));
+    }
+
+    private static int Add(Row? row, string column, int delta) =>
+        Math.Max(0, (row is null || row.IsNull(column) ? 0 : row.GetValue<int>(column)) + delta);
+
+    private static string? OptionalRowString(Row? row, string column) =>
+        row is null || row.IsNull(column) ? null : row.GetValue<string>(column);
+
+    private static bool TryReadGuid(JsonElement payload, string propertyName, out Guid value)
+    {
+        value = Guid.Empty;
+        return payload.TryGetProperty(propertyName, out var property)
+            && property.ValueKind == JsonValueKind.String
+            && Guid.TryParse(property.GetString(), out value);
+    }
+
+    private static bool TryReadString(JsonElement payload, string propertyName, out string value)
+    {
+        value = string.Empty;
+        if (!payload.TryGetProperty(propertyName, out var property) ||
+            property.ValueKind != JsonValueKind.String)
+        {
+            return false;
+        }
+
+        value = property.GetString() ?? string.Empty;
+        return !string.IsNullOrWhiteSpace(value);
+    }
+
+    private static Guid RequiredGuid(JsonElement payload, string propertyName) =>
+        TryReadGuid(payload, propertyName, out var value)
+            ? value
+            : throw new InvalidOperationException($"{propertyName} es requerido.");
+
+    private static DateTimeOffset RequiredDateTimeOffset(JsonElement payload, string propertyName)
+    {
+        if (!payload.TryGetProperty(propertyName, out var property) ||
+            property.ValueKind != JsonValueKind.String ||
+            !DateTimeOffset.TryParse(property.GetString(), out var value))
+        {
+            throw new InvalidOperationException($"{propertyName} es requerido.");
+        }
+
+        return value;
+    }
+
+    private static string? OptionalString(JsonElement payload, string propertyName) =>
+        payload.TryGetProperty(propertyName, out var property) &&
+        property.ValueKind == JsonValueKind.String
+            ? property.GetString()
+            : null;
+
+    private static int GetDurationMinutes(JsonElement payload)
+    {
+        if (payload.TryGetProperty("durationMinutes", out var durationProperty) &&
+            durationProperty.ValueKind == JsonValueKind.Number &&
+            durationProperty.TryGetInt32(out var durationMinutes))
+        {
+            return durationMinutes;
+        }
+
+        var startAt = RequiredDateTimeOffset(payload, "startAt");
+        var endAt = RequiredDateTimeOffset(payload, "endAt");
+        return Math.Max(0, (int)Math.Round((endAt - startAt).TotalMinutes));
+    }
+
+    private static LocalDate ToCassandraDate(DateTimeOffset value)
+    {
+        var utc = value.UtcDateTime;
+        return new LocalDate(utc.Year, utc.Month, utc.Day);
+    }
+
+    private static string ToYearMonth(DateTimeOffset value)
+    {
+        var utc = value.UtcDateTime;
+        return $"{utc.Year:D4}-{utc.Month:D2}";
     }
 }

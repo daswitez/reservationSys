@@ -218,6 +218,100 @@ public sealed class ReservationsEndpointTests(BookingApiFactory factory)
     }
 
     [Fact]
+    public async Task GetById_ClientOwner_ReturnsReservation()
+    {
+        var clientUserId = Guid.NewGuid();
+        var setup = await CreateReservationSetupAsync();
+        var reservationId = await CreateReservationInDbAsync(setup, clientUserId);
+
+        using var request = GetByIdRequest(reservationId, "client", clientUserId);
+        using var response = await _client.SendAsync(request);
+        using var payload = await response.Content.ReadFromJsonAsync<JsonDocument>();
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(reservationId, payload!.RootElement.GetProperty("data").GetProperty("reservationId").GetGuid());
+    }
+
+    [Fact]
+    public async Task GetById_OtherClient_ReturnsForbidden()
+    {
+        var ownerClientId = Guid.NewGuid();
+        var setup = await CreateReservationSetupAsync();
+        var reservationId = await CreateReservationInDbAsync(setup, ownerClientId);
+
+        using var request = GetByIdRequest(reservationId, "client", Guid.NewGuid());
+        using var response = await _client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task GetById_TenantAdminSameTenant_ReturnsReservation()
+    {
+        var setup = await CreateReservationSetupAsync();
+        var reservationId = await CreateReservationInDbAsync(setup, Guid.NewGuid());
+
+        using var request = GetByIdRequest(
+            reservationId,
+            "tenant_admin",
+            Guid.NewGuid(),
+            tenantId: setup.TenantId);
+        using var response = await _client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task GetById_TenantAdminOtherTenant_ReturnsForbidden()
+    {
+        var setup = await CreateReservationSetupAsync();
+        var reservationId = await CreateReservationInDbAsync(setup, Guid.NewGuid());
+
+        using var request = GetByIdRequest(
+            reservationId,
+            "tenant_admin",
+            Guid.NewGuid(),
+            tenantId: Guid.NewGuid());
+        using var response = await _client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task GetById_BranchAdminSameBranch_ReturnsReservation()
+    {
+        var setup = await CreateReservationSetupAsync();
+        var reservationId = await CreateReservationInDbAsync(setup, Guid.NewGuid());
+
+        using var request = GetByIdRequest(
+            reservationId,
+            "branch_admin",
+            Guid.NewGuid(),
+            tenantId: setup.TenantId,
+            branchId: setup.BranchId);
+        using var response = await _client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task GetById_BranchAdminOtherBranch_ReturnsForbidden()
+    {
+        var setup = await CreateReservationSetupAsync();
+        var reservationId = await CreateReservationInDbAsync(setup, Guid.NewGuid());
+
+        using var request = GetByIdRequest(
+            reservationId,
+            "branch_admin",
+            Guid.NewGuid(),
+            tenantId: setup.TenantId,
+            branchId: Guid.NewGuid());
+        using var response = await _client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    [Fact]
     public async Task Cancel_WithoutToken_ReturnsUnauthorized()
     {
         using var response = await _client.PatchAsJsonAsync(
@@ -291,6 +385,23 @@ public sealed class ReservationsEndpointTests(BookingApiFactory factory)
         var reservationId = await CreateReservationInDbAsync(setup, clientUserId);
 
         using var request = CancelRequest(reservationId, "tenant_admin", Guid.NewGuid(), tenantId: Guid.NewGuid());
+        using var response = await _client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task BranchAdmin_CannotCancelReservationInOtherBranch_ReturnsForbidden()
+    {
+        var setup = await CreateReservationSetupAsync();
+        var reservationId = await CreateReservationInDbAsync(setup, Guid.NewGuid());
+
+        using var request = CancelRequest(
+            reservationId,
+            "branch_admin",
+            Guid.NewGuid(),
+            tenantId: setup.TenantId,
+            branchId: Guid.NewGuid());
         using var response = await _client.SendAsync(request);
 
         Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
@@ -382,6 +493,23 @@ public sealed class ReservationsEndpointTests(BookingApiFactory factory)
         var reservationId = await CreateReservationInDbAsync(setup, clientUserId);
 
         using var request = AttendRequest(reservationId, "tenant_admin", Guid.NewGuid(), Guid.NewGuid());
+        using var response = await _client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task BranchAdmin_CannotAttendReservationInOtherBranch_ReturnsForbidden()
+    {
+        var setup = await CreateReservationSetupAsync();
+        var reservationId = await CreateReservationInDbAsync(setup, Guid.NewGuid());
+
+        using var request = AttendRequest(
+            reservationId,
+            "branch_admin",
+            Guid.NewGuid(),
+            setup.TenantId,
+            branchId: Guid.NewGuid());
         using var response = await _client.SendAsync(request);
 
         Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
@@ -494,6 +622,23 @@ public sealed class ReservationsEndpointTests(BookingApiFactory factory)
     }
 
     [Fact]
+    public async Task BranchAdmin_CannotMarkNoShowInOtherBranch_ReturnsForbidden()
+    {
+        var setup = await CreateReservationSetupAsync();
+        var reservationId = await CreateReservationInDbAsync(setup, Guid.NewGuid());
+
+        using var request = NoShowRequest(
+            reservationId,
+            "branch_admin",
+            Guid.NewGuid(),
+            setup.TenantId,
+            branchId: Guid.NewGuid());
+        using var response = await _client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    [Fact]
     public async Task NoShow_AlreadyNoShowReservation_ReturnsConflict()
     {
         var clientUserId = Guid.NewGuid();
@@ -542,6 +687,8 @@ public sealed class ReservationsEndpointTests(BookingApiFactory factory)
         var paths = payload!.RootElement.GetProperty("paths");
         Assert.True(paths.TryGetProperty("/reservations", out var reservations));
         Assert.True(reservations.TryGetProperty("post", out _));
+        Assert.True(paths.TryGetProperty("/reservations/{reservationId}", out var reservationById));
+        Assert.True(reservationById.TryGetProperty("get", out _));
         Assert.True(paths.TryGetProperty("/reservations/{reservationId}/cancel", out var cancel));
         Assert.True(cancel.TryGetProperty("patch", out _));
         Assert.True(paths.TryGetProperty("/reservations/{reservationId}/attend", out var attend));
@@ -694,7 +841,8 @@ public sealed class ReservationsEndpointTests(BookingApiFactory factory)
         string role,
         Guid userId,
         string? reason = null,
-        Guid? tenantId = null)
+        Guid? tenantId = null,
+        Guid? branchId = null)
     {
         var request = new HttpRequestMessage(
             HttpMethod.Patch,
@@ -703,7 +851,26 @@ public sealed class ReservationsEndpointTests(BookingApiFactory factory)
         request.Headers.Add("X-Test-User-Id", userId.ToString());
         if (tenantId.HasValue)
             request.Headers.Add("X-Test-Tenant-Id", tenantId.Value.ToString());
+        if (branchId.HasValue)
+            request.Headers.Add("X-Test-Branch-Id", branchId.Value.ToString());
         request.Content = JsonContent.Create(new { reason });
+        return request;
+    }
+
+    private static HttpRequestMessage GetByIdRequest(
+        Guid reservationId,
+        string role,
+        Guid userId,
+        Guid? tenantId = null,
+        Guid? branchId = null)
+    {
+        var request = new HttpRequestMessage(HttpMethod.Get, $"/reservations/{reservationId}");
+        request.Headers.Add("X-Test-Role", role);
+        request.Headers.Add("X-Test-User-Id", userId.ToString());
+        if (tenantId.HasValue)
+            request.Headers.Add("X-Test-Tenant-Id", tenantId.Value.ToString());
+        if (branchId.HasValue)
+            request.Headers.Add("X-Test-Branch-Id", branchId.Value.ToString());
         return request;
     }
 
@@ -711,7 +878,8 @@ public sealed class ReservationsEndpointTests(BookingApiFactory factory)
         Guid reservationId,
         string role,
         Guid userId,
-        Guid? tenantId = null)
+        Guid? tenantId = null,
+        Guid? branchId = null)
     {
         var request = new HttpRequestMessage(
             HttpMethod.Patch,
@@ -720,6 +888,8 @@ public sealed class ReservationsEndpointTests(BookingApiFactory factory)
         request.Headers.Add("X-Test-User-Id", userId.ToString());
         if (tenantId.HasValue)
             request.Headers.Add("X-Test-Tenant-Id", tenantId.Value.ToString());
+        if (branchId.HasValue)
+            request.Headers.Add("X-Test-Branch-Id", branchId.Value.ToString());
         return request;
     }
 
@@ -727,7 +897,8 @@ public sealed class ReservationsEndpointTests(BookingApiFactory factory)
         Guid reservationId,
         string role,
         Guid userId,
-        Guid? tenantId = null)
+        Guid? tenantId = null,
+        Guid? branchId = null)
     {
         var request = new HttpRequestMessage(
             HttpMethod.Patch,
@@ -736,6 +907,8 @@ public sealed class ReservationsEndpointTests(BookingApiFactory factory)
         request.Headers.Add("X-Test-User-Id", userId.ToString());
         if (tenantId.HasValue)
             request.Headers.Add("X-Test-Tenant-Id", tenantId.Value.ToString());
+        if (branchId.HasValue)
+            request.Headers.Add("X-Test-Branch-Id", branchId.Value.ToString());
         return request;
     }
 

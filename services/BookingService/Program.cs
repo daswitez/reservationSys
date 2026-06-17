@@ -1,6 +1,7 @@
 using System.Text;
 using BookingService.Common;
 using BookingService.Data;
+using BookingService.Features.Outbox;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -54,6 +55,14 @@ builder.Services.AddDbContext<BookingDbContext>(options =>
 builder.Services.AddHttpClient("IdentityValidation", client =>
     client.BaseAddress = new Uri(builder.Configuration["Services:IdentityBaseUrl"]
         ?? throw new InvalidOperationException("Services:IdentityBaseUrl is required.")));
+builder.Services.AddHttpClient("ReportingEvents", client =>
+    client.BaseAddress = new Uri(builder.Configuration["Services:ReportingBaseUrl"]
+        ?? throw new InvalidOperationException("Services:ReportingBaseUrl is required.")));
+
+if (builder.Configuration.GetValue("Outbox:WorkerEnabled", false))
+{
+    builder.Services.AddHostedService<BookingOutboxWorker>();
+}
 
 var jwtSecret = builder.Configuration["Jwt:Secret"]
     ?? throw new InvalidOperationException("Jwt:Secret is required.");

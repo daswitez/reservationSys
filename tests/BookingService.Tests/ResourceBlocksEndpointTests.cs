@@ -95,10 +95,42 @@ public sealed class ResourceBlocksEndpointTests(BookingApiFactory factory)
     }
 
     [Fact]
+    public async Task BranchAdmin_CanCreateBlockForResourceInOwnBranch()
+    {
+        var setup = await CreateBlockSetupAsync();
+        using var request = BlockRequest(
+            setup,
+            "branch_admin",
+            Guid.NewGuid(),
+            setup.TenantId,
+            setup.BranchId);
+
+        using var response = await _client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
+    }
+
+    [Fact]
     public async Task TenantAdmin_CannotCreateBlockForResourceInOtherTenant_ReturnsForbidden()
     {
         var setup = await CreateBlockSetupAsync();
         using var request = BlockRequest(setup, "tenant_admin", Guid.NewGuid(), Guid.NewGuid());
+        using var response = await _client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task BranchAdmin_CannotCreateBlockForResourceInOtherBranch_ReturnsForbidden()
+    {
+        var setup = await CreateBlockSetupAsync();
+        using var request = BlockRequest(
+            setup,
+            "branch_admin",
+            Guid.NewGuid(),
+            setup.TenantId,
+            Guid.NewGuid());
+
         using var response = await _client.SendAsync(request);
 
         Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
@@ -216,6 +248,40 @@ public sealed class ResourceBlocksEndpointTests(BookingApiFactory factory)
     }
 
     [Fact]
+    public async Task BranchAdmin_CannotCancelBlockInOtherBranch_ReturnsForbidden()
+    {
+        var setup = await CreateBlockSetupAsync();
+        var blockId = await CreateBlockInDbAsync(setup);
+
+        using var request = CancelBlockRequest(
+            blockId,
+            "branch_admin",
+            Guid.NewGuid(),
+            setup.TenantId,
+            Guid.NewGuid());
+        using var response = await _client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task BranchAdmin_CannotGetBlockInOtherBranch_ReturnsForbidden()
+    {
+        var setup = await CreateBlockSetupAsync();
+        var blockId = await CreateBlockInDbAsync(setup);
+
+        using var request = GetBlockRequest(
+            blockId,
+            "branch_admin",
+            Guid.NewGuid(),
+            setup.TenantId,
+            Guid.NewGuid());
+        using var response = await _client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    [Fact]
     public async Task CancelBlock_AlreadyCancelledBlock_ReturnsConflict()
     {
         var setup = await CreateBlockSetupAsync();
@@ -267,7 +333,8 @@ public sealed class ResourceBlocksEndpointTests(BookingApiFactory factory)
         Guid blockId,
         string role,
         Guid userId,
-        Guid? tenantId = null)
+        Guid? tenantId = null,
+        Guid? branchId = null)
     {
         var request = new HttpRequestMessage(
             HttpMethod.Patch,
@@ -276,6 +343,25 @@ public sealed class ResourceBlocksEndpointTests(BookingApiFactory factory)
         request.Headers.Add("X-Test-User-Id", userId.ToString());
         if (tenantId.HasValue)
             request.Headers.Add("X-Test-Tenant-Id", tenantId.Value.ToString());
+        if (branchId.HasValue)
+            request.Headers.Add("X-Test-Branch-Id", branchId.Value.ToString());
+        return request;
+    }
+
+    private static HttpRequestMessage GetBlockRequest(
+        Guid blockId,
+        string role,
+        Guid userId,
+        Guid? tenantId = null,
+        Guid? branchId = null)
+    {
+        var request = new HttpRequestMessage(HttpMethod.Get, $"/resource-blocks/{blockId}");
+        request.Headers.Add("X-Test-Role", role);
+        request.Headers.Add("X-Test-User-Id", userId.ToString());
+        if (tenantId.HasValue)
+            request.Headers.Add("X-Test-Tenant-Id", tenantId.Value.ToString());
+        if (branchId.HasValue)
+            request.Headers.Add("X-Test-Branch-Id", branchId.Value.ToString());
         return request;
     }
 
@@ -331,7 +417,8 @@ public sealed class ResourceBlocksEndpointTests(BookingApiFactory factory)
         BlockSetup setup,
         string role,
         Guid userId,
-        Guid? tenantId = null)
+        Guid? tenantId = null,
+        Guid? branchId = null)
     {
         var now = DateTimeOffset.UtcNow;
         var request = new HttpRequestMessage(HttpMethod.Post, "/resource-blocks");
@@ -339,6 +426,8 @@ public sealed class ResourceBlocksEndpointTests(BookingApiFactory factory)
         request.Headers.Add("X-Test-User-Id", userId.ToString());
         if (tenantId.HasValue)
             request.Headers.Add("X-Test-Tenant-Id", tenantId.Value.ToString());
+        if (branchId.HasValue)
+            request.Headers.Add("X-Test-Branch-Id", branchId.Value.ToString());
         request.Content = JsonContent.Create(new
         {
             resourceId = setup.ResourceId,

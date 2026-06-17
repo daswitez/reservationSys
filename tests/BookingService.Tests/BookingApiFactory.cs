@@ -13,6 +13,7 @@ public sealed class BookingApiFactory : WebApplicationFactory<Program>
         builder.UseSetting(
             "ConnectionStrings:Postgres",
             "Host=localhost;Port=55432;Database=reservas_mvp;Username=reservas;Password=reservas_dev;Search Path=booking");
+        builder.UseSetting("Outbox:WorkerEnabled", "false");
 
         builder.ConfigureServices(services =>
         {

@@ -36,11 +36,6 @@ public sealed class ResourceBlocksController(BookingDbContext dbContext) : Contr
                 "El JWT no contiene user_id valido."));
         }
 
-        if (User.IsInRole("client"))
-        {
-            return Forbid();
-        }
-
         if (request.ResourceId == Guid.Empty)
             return ValidationError("resourceId es requerido.");
 
@@ -66,11 +61,9 @@ public sealed class ResourceBlocksController(BookingDbContext dbContext) : Contr
                 $"No existe un recurso activo '{request.ResourceId}'."));
         }
 
-        if (!User.IsInRole("super_admin"))
+        if (!CanAccessTenantBranch(resource.TenantId, resource.BranchId, out var failure))
         {
-            var tenantIdClaim = User.FindFirstValue("tenant_id");
-            if (!Guid.TryParse(tenantIdClaim, out var tenantId) || resource.TenantId != tenantId)
-                return Forbid();
+            return failure!;
         }
 
         var startAt = request.StartAt.ToUniversalTime();
@@ -149,11 +142,6 @@ public sealed class ResourceBlocksController(BookingDbContext dbContext) : Contr
                 "El JWT no contiene user_id valido."));
         }
 
-        if (User.IsInRole("client"))
-        {
-            return Forbid();
-        }
-
         var block = await dbContext.ResourceBlocks
             .SingleOrDefaultAsync(b => b.BlockId == blockId, cancellationToken);
 
@@ -164,11 +152,9 @@ public sealed class ResourceBlocksController(BookingDbContext dbContext) : Contr
                 $"No existe el bloqueo '{blockId}'."));
         }
 
-        if (!User.IsInRole("super_admin"))
+        if (!CanAccessTenantBranch(block.TenantId, block.BranchId, out var failure))
         {
-            var tenantIdClaim = User.FindFirstValue("tenant_id");
-            if (!Guid.TryParse(tenantIdClaim, out var tenantId) || block.TenantId != tenantId)
-                return Forbid();
+            return failure!;
         }
 
         if (block.Status != "ACTIVE")
@@ -204,6 +190,8 @@ public sealed class ResourceBlocksController(BookingDbContext dbContext) : Contr
     [Authorize(Policy = "AuthenticatedUser")]
     [HttpGet("resource-blocks/{blockId:guid}")]
     [ProducesResponseType(typeof(ApiResponse<ResourceBlockResponse>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ApiResponse<object>), StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(typeof(ApiResponse<object>), StatusCodes.Status403Forbidden)]
     [ProducesResponseType(typeof(ApiResponse<object>), StatusCodes.Status404NotFound)]
     public async Task<IActionResult> GetById(Guid blockId, CancellationToken cancellationToken)
     {
@@ -211,17 +199,85 @@ public sealed class ResourceBlocksController(BookingDbContext dbContext) : Contr
             .AsNoTracking()
             .SingleOrDefaultAsync(b => b.BlockId == blockId, cancellationToken);
 
-        return block is null
-            ? NotFound(ApiResponse<object>.Failure(
+        if (block is null)
+        {
+            return NotFound(ApiResponse<object>.Failure(
                 "BLOCK_NOT_FOUND",
-                $"No existe el bloqueo '{blockId}'."))
-            : Ok(ApiResponse<ResourceBlockResponse>.Ok(ToResponse(block)));
+                $"No existe el bloqueo '{blockId}'."));
+        }
+
+        if (!CanAccessTenantBranch(block.TenantId, block.BranchId, out var failure))
+        {
+            return failure!;
+        }
+
+        return Ok(ApiResponse<ResourceBlockResponse>.Ok(ToResponse(block)));
     }
 
     private bool TryGetUserId(out Guid userId)
     {
         var value = User.FindFirstValue("user_id");
         return Guid.TryParse(value, out userId);
+    }
+
+    private bool CanAccessTenantBranch(
+        Guid tenantId,
+        Guid branchId,
+        out IActionResult? failure)
+    {
+        failure = null;
+
+        if (User.IsInRole("super_admin"))
+        {
+            return true;
+        }
+
+        if (User.IsInRole("client"))
+        {
+            failure = Forbid();
+            return false;
+        }
+
+        var tenantIdClaim = User.FindFirstValue("tenant_id");
+        if (!Guid.TryParse(tenantIdClaim, out var claimTenantId))
+        {
+            failure = Unauthorized(ApiResponse<object>.Failure(
+                "UNAUTHORIZED",
+                "El JWT no contiene tenant_id valido."));
+            return false;
+        }
+
+        if (tenantId != claimTenantId)
+        {
+            failure = Forbid();
+            return false;
+        }
+
+        if (User.IsInRole("branch_admin"))
+        {
+            var branchIdClaim = User.FindFirstValue("branch_id");
+            if (!Guid.TryParse(branchIdClaim, out var claimBranchId))
+            {
+                failure = Unauthorized(ApiResponse<object>.Failure(
+                    "UNAUTHORIZED",
+                    "El JWT no contiene branch_id valido."));
+                return false;
+            }
+
+            if (branchId != claimBranchId)
+            {
+                failure = Forbid();
+                return false;
+            }
+        }
+
+        if (User.IsInRole("tenant_admin") || User.IsInRole("branch_admin"))
+        {
+            return true;
+        }
+
+        failure = Forbid();
+        return false;
     }
 
     private static BadRequestObjectResult ValidationError(string message) =>

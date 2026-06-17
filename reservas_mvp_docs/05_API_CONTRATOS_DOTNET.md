@@ -935,8 +935,26 @@ Errores posibles:
 
 ### GET /reservations/{reservationId}
 
-Devuelve el detalle de una reserva. Cualquier usuario autenticado puede consultar
-por ID; la autorización por tenant o propietario no se aplica en esta lectura.
+Devuelve el detalle de una reserva aplicando autorizacion por propietario,
+tenant o sucursal.
+
+Reglas de acceso:
+
+- `client`: solo puede leer sus propias reservas.
+- `tenant_admin`: solo puede leer reservas de su `tenant_id`.
+- `branch_admin`: solo puede leer reservas de su `tenant_id` y `branch_id`.
+- `super_admin`: puede leer cualquier reserva.
+
+Ejemplo para Postman/curl:
+
+```bash
+export BOOKING_URL="http://localhost:5203"
+export RESERVATION_ID="00000000-0000-0000-0000-000000000000"
+export CLIENT_TOKEN="pegar_token_cliente_o_admin"
+
+curl -sS "$BOOKING_URL/reservations/$RESERVATION_ID" \
+  -H "Authorization: Bearer $CLIENT_TOKEN" | jq
+```
 
 Response:
 
@@ -962,12 +980,18 @@ Response:
 
 Errores:
 
+- `401 UNAUTHORIZED` si el JWT no contiene los claims requeridos para el rol.
+- `403 Forbidden` si el usuario autenticado no puede acceder a esa reserva.
 - `404 RESERVATION_NOT_FOUND` si el ID no existe.
 
 ### PATCH /reservations/{reservationId}/cancel
 
 Cancela una reserva confirmada. El cliente solo puede cancelar su propia reserva;
-usuarios internos pueden cancelar cualquier reserva de su tenant.
+usuarios internos quedan limitados por su alcance:
+
+- `tenant_admin`: reservas de su `tenant_id`.
+- `branch_admin`: reservas de su `tenant_id` y `branch_id`.
+- `super_admin`: cualquier reserva.
 
 Request (`reason` opcional):
 
@@ -983,11 +1007,15 @@ Errores:
 
 - `404 RESERVATION_NOT_FOUND`
 - `409 INVALID_STATUS_TRANSITION` si la reserva ya está cancelada, atendida o no-show.
-- `403` si el cliente intenta cancelar una reserva ajena.
+- `403` si el usuario intenta cancelar una reserva fuera de su alcance.
 
 ### PATCH /reservations/{reservationId}/attend
 
-Marca la reserva como `ATTENDED`. Solo usuarios internos (`tenant_admin`, `branch_admin`).
+Marca la reserva como `ATTENDED`. Solo usuarios internos:
+
+- `tenant_admin`: reservas de su `tenant_id`.
+- `branch_admin`: reservas de su `tenant_id` y `branch_id`.
+- `super_admin`: cualquier reserva.
 
 Response: mismo schema que `POST /reservations` con `status: "ATTENDED"`.
 
@@ -995,10 +1023,15 @@ Errores:
 
 - `404 RESERVATION_NOT_FOUND`
 - `409 INVALID_STATUS_TRANSITION` si la reserva no está en estado `CONFIRMED`.
+- `403` si el usuario intenta operar una reserva fuera de su alcance.
 
 ### PATCH /reservations/{reservationId}/no-show
 
-Marca la reserva como `NO_SHOW`. Solo usuarios internos.
+Marca la reserva como `NO_SHOW`. Solo usuarios internos:
+
+- `tenant_admin`: reservas de su `tenant_id`.
+- `branch_admin`: reservas de su `tenant_id` y `branch_id`.
+- `super_admin`: cualquier reserva.
 
 Response: mismo schema que `POST /reservations` con `status: "NO_SHOW"`.
 
@@ -1006,6 +1039,7 @@ Errores:
 
 - `404 RESERVATION_NOT_FOUND`
 - `409 INVALID_STATUS_TRANSITION` si la reserva no está en estado `CONFIRMED`.
+- `403` si el usuario intenta operar una reserva fuera de su alcance.
 
 ### GET /admin/reservations
 
@@ -1122,11 +1156,16 @@ Errores:
 Crea un bloqueo manual. Solo usuarios internos. El bloqueo nace con estado `ACTIVE`
 y excluye esa franja del motor de disponibilidad desde el momento en que se crea.
 
+Reglas de acceso:
+
+- `tenant_admin`: puede bloquear recursos de su `tenant_id`.
+- `branch_admin`: solo puede bloquear recursos de su `tenant_id` y `branch_id`.
+- `super_admin`: puede bloquear cualquier recurso.
+
 Request:
 
 ```json
 {
-  "branchId": "uuid",
   "resourceId": "uuid",
   "startAt": "2026-06-17T13:00:00-04:00",
   "endAt": "2026-06-17T15:00:00-04:00",
@@ -1159,26 +1198,31 @@ Response:
 
 Errores:
 
-- `404 RESOURCE_NOT_FOUND` si el recurso no existe o no pertenece a la sucursal.
-- `409 RESOURCE_BLOCKED` si ya existe un bloqueo activo en ese rango.
+- `403 Forbidden` si el usuario intenta bloquear un recurso fuera de su alcance.
+- `404 RESOURCE_NOT_FOUND` si el recurso no existe o no está activo.
+- `409 BLOCK_OVERLAP` si ya existe un bloqueo activo en ese rango.
 
 ### GET /resource-blocks/{blockId}
 
-Devuelve el detalle de un bloqueo. Solo usuarios internos. Response: mismo schema
-que `POST /resource-blocks`.
+Devuelve el detalle de un bloqueo. Solo usuarios internos. `tenant_admin` queda
+limitado a su tenant; `branch_admin` queda limitado a su sucursal. Response:
+mismo schema que `POST /resource-blocks`.
 
 Errores:
 
+- `403 Forbidden` si el usuario intenta leer un bloqueo fuera de su alcance.
 - `404 BLOCK_NOT_FOUND` si el ID no existe.
 
 ### PATCH /resource-blocks/{blockId}/cancel
 
-Cancela un bloqueo activo. Solo usuarios internos.
+Cancela un bloqueo activo. Solo usuarios internos. `tenant_admin` queda limitado
+a su tenant; `branch_admin` queda limitado a su sucursal.
 
 Response: mismo schema que `POST /resource-blocks` con `status: "CANCELLED"`.
 
 Errores:
 
+- `403 Forbidden` si el usuario intenta cancelar un bloqueo fuera de su alcance.
 - `404 BLOCK_NOT_FOUND`
 - `409 INVALID_STATUS_TRANSITION` si el bloqueo ya está cancelado.
 
@@ -1396,7 +1440,21 @@ Errores:
 ### POST /internal/report-events
 
 Endpoint interno usado por el outbox worker de Booking. No requiere JWT de usuario;
-la autenticación servicio-a-servicio se define al implementar el worker.
+la llamada la realiza `BookingOutboxWorker` leyendo eventos desde
+`booking.reservation_event_outbox`.
+
+Politica del worker:
+
+- Lee eventos `PENDING` en lotes (`Outbox:BatchSize`, default `20`).
+- Marca cada evento como `PROCESSING` antes de enviarlo.
+- Envia el payload a `POST /internal/report-events`.
+- Si Reporting responde `2xx`, marca el evento como `PROCESSED` y guarda `processed_at`.
+- Si falla, incrementa `attempts`, guarda `last_error` y vuelve a `PENDING` hasta
+  `Outbox:MaxAttempts`; luego queda `FAILED`.
+
+Reporting usa `report_processed_events.event_id` para idempotencia. Si recibe el
+mismo `eventId` otra vez, responde `200` con `status: "DUPLICATE"` y no duplica
+contadores.
 
 Request:
 
@@ -1420,13 +1478,45 @@ Request:
 }
 ```
 
-Response:
+Response procesado:
 
 ```json
 {
-  "accepted": true
+  "success": true,
+  "data": {
+    "status": "PROCESSED",
+    "eventId": "uuid"
+  },
+  "error": null
 }
 ```
+
+Response duplicado:
+
+```json
+{
+  "success": true,
+  "data": {
+    "status": "DUPLICATE",
+    "eventId": "uuid"
+  },
+  "error": null
+}
+```
+
+Eventos soportados:
+
+- `ReservationCreated`
+- `ReservationCancelled`
+- `ReservationAttended`
+- `ReservationNoShow`
+- `ResourceBlockCreated`
+- `ResourceBlockCancelled`
+
+Errores:
+
+- `400 VALIDATION_ERROR` si falta `eventId`, `eventType` o `tenantId`.
+- `400 UNSUPPORTED_EVENT` si `eventType` no es soportado.
 
 ## Guia ejecutable para curl y Postman
 
@@ -2058,7 +2148,8 @@ curl -sS -X POST "$BOOKING_URL/reservations" \
 
 #### GET /reservations/{reservationId}
 
-Estado: `IMPLEMENTADO` para HU-017. Autenticacion: cualquier JWT valido.
+Estado: `IMPLEMENTADO` para HU-017. Autenticacion: JWT valido con acceso a la
+reserva por propietario, tenant o sucursal.
 
 ```bash
 curl -sS "$BOOKING_URL/reservations/$RESERVATION_ID" \
@@ -2067,7 +2158,8 @@ curl -sS "$BOOKING_URL/reservations/$RESERVATION_ID" \
 
 #### PATCH /reservations/{reservationId}/cancel
 
-Estado: `IMPLEMENTADO` para HU-018. Autenticacion: cliente propietario o usuario interno.
+Estado: `IMPLEMENTADO` para HU-018. Autenticacion: cliente propietario,
+`tenant_admin` del mismo tenant, `branch_admin` de la misma sucursal o `super_admin`.
 
 ```bash
 curl -i -X PATCH "$BOOKING_URL/reservations/$RESERVATION_ID/cancel" \
@@ -2078,7 +2170,8 @@ curl -i -X PATCH "$BOOKING_URL/reservations/$RESERVATION_ID/cancel" \
 
 #### PATCH /reservations/{reservationId}/attend
 
-Estado: `IMPLEMENTADO` para HU-019. Autenticacion: usuario interno.
+Estado: `IMPLEMENTADO` para HU-019. Autenticacion: `tenant_admin` del mismo
+tenant, `branch_admin` de la misma sucursal o `super_admin`.
 
 ```bash
 curl -i -X PATCH "$BOOKING_URL/reservations/$RESERVATION_ID/attend" \
@@ -2087,7 +2180,8 @@ curl -i -X PATCH "$BOOKING_URL/reservations/$RESERVATION_ID/attend" \
 
 #### PATCH /reservations/{reservationId}/no-show
 
-Estado: `IMPLEMENTADO` para HU-020. Autenticacion: usuario interno.
+Estado: `IMPLEMENTADO` para HU-020. Autenticacion: `tenant_admin` del mismo
+tenant, `branch_admin` de la misma sucursal o `super_admin`.
 
 ```bash
 curl -i -X PATCH "$BOOKING_URL/reservations/$RESERVATION_ID/no-show" \
@@ -2122,7 +2216,9 @@ curl -sS "$BOOKING_URL/admin/agenda?branchId=$BRANCH_ID&date=$TEST_DATE&resource
 
 #### POST /resource-blocks
 
-Estado: `IMPLEMENTADO` para HU-021. Autenticacion: usuario interno. Guardar `data.blockId` como `BLOCK_ID`.
+Estado: `IMPLEMENTADO` para HU-021. Autenticacion: `tenant_admin` del mismo
+tenant, `branch_admin` de la misma sucursal o `super_admin`. Guardar
+`data.blockId` como `BLOCK_ID`.
 
 ```bash
 export BLOCK_RESPONSE="$(curl -sS -X POST "$BOOKING_URL/resource-blocks" \
@@ -2135,7 +2231,8 @@ export BLOCK_ID="$(echo "$BLOCK_RESPONSE" | jq -r '.data.blockId')"
 
 #### GET /resource-blocks/{blockId}
 
-Estado: `IMPLEMENTADO`. Autenticacion: usuario interno.
+Estado: `IMPLEMENTADO`. Autenticacion: `tenant_admin` del mismo tenant,
+`branch_admin` de la misma sucursal o `super_admin`.
 
 ```bash
 curl -sS "$BOOKING_URL/resource-blocks/$BLOCK_ID" \
@@ -2144,7 +2241,8 @@ curl -sS "$BOOKING_URL/resource-blocks/$BLOCK_ID" \
 
 #### PATCH /resource-blocks/{blockId}/cancel
 
-Estado: `IMPLEMENTADO` para HU-023. Autenticacion: usuario interno.
+Estado: `IMPLEMENTADO` para HU-023. Autenticacion: `tenant_admin` del mismo
+tenant, `branch_admin` de la misma sucursal o `super_admin`.
 
 ```bash
 curl -i -X PATCH "$BOOKING_URL/resource-blocks/$BLOCK_ID/cancel" \
@@ -2240,7 +2338,8 @@ curl -sS "$REPORTING_URL/reports/peak-hours?date=$TEST_DATE" \
 
 #### POST /internal/report-events
 
-Estado: endpoint disponible pero el worker outbox de Booking aun no esta implementado.
+Estado: `IMPLEMENTADO`. El worker outbox de Booking envia eventos `PENDING`
+automaticamente cuando `Outbox:WorkerEnabled=true`.
 Autenticacion: llamada interna sin JWT de usuario.
 
 ```bash
