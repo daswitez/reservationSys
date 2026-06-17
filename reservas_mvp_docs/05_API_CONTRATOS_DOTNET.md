@@ -812,9 +812,32 @@ Realiza baja logica del horario base. Solo `tenant_admin`. Cambia el estado a
 
 Base URL local del entorno Docker actual: `http://localhost:5203`
 
+### Criterio de fechas y horas
+
+- Los inputs `startAt`/`endAt` aceptan ISO-8601 con offset explícito, por ejemplo
+  `2026-06-17T09:00:00-04:00`.
+- La persistencia interna en PostgreSQL y los eventos outbox usan UTC.
+- Endpoints públicos o orientados al cliente devuelven horarios en el timezone de
+  la sucursal:
+  - `GET /availability`
+  - `POST /reservations`
+  - `GET /reservations/{reservationId}`
+  - `PATCH /reservations/{reservationId}/cancel`
+  - `PATCH /reservations/{reservationId}/attend`
+  - `PATCH /reservations/{reservationId}/no-show`
+- La agenda administrativa `GET /admin/agenda` devuelve reservas y bloqueos en el
+  timezone de la sucursal consultada.
+- Endpoints administrativos operativos que exponen datos internos en lote o
+  bloqueos directos devuelven UTC salvo que se indique lo contrario:
+  - `GET /admin/reservations`
+  - `POST /resource-blocks`
+  - `GET /resource-blocks/{blockId}`
+  - `PATCH /resource-blocks/{blockId}/cancel`
+
 ### GET /availability
 
 Consulta slots disponibles. No requiere JWT.
+`startAt` y `endAt` se devuelven en el timezone de la sucursal.
 
 Query params:
 
@@ -869,6 +892,7 @@ Errores:
 ### POST /reservations
 
 Crea reserva confirmada. Requiere JWT con rol `client`.
+`startAt` y `endAt` se devuelven en el timezone de la sucursal.
 
 Para un usuario `client`, `client_user_id` se toma de `user_id` en el JWT. El
 tenant no viene del JWT del cliente: Booking lo deriva de la sucursal y servicio
@@ -936,7 +960,8 @@ Errores posibles:
 ### GET /reservations/{reservationId}
 
 Devuelve el detalle de una reserva aplicando autorizacion por propietario,
-tenant o sucursal.
+tenant o sucursal. `startAt` y `endAt` se devuelven en el timezone de la
+sucursal.
 
 Reglas de acceso:
 
@@ -1047,6 +1072,7 @@ Busca reservas con filtros. Solo usuarios internos (`client` recibe `403`).
 `tenant_admin` ve todas las reservas de su tenant; `branch_admin` está restringido
 a su sucursal del claim. `super_admin` ve todas. Máximo 200 resultados, ordenados
 por `startAt` descendente. Cada reserva incluye su historial de estado.
+`startAt` y `endAt` se devuelven en UTC.
 
 Query params (todos opcionales):
 
@@ -1074,8 +1100,8 @@ Response:
       "resourceId": "uuid",
       "clientUserId": "uuid",
       "status": "CONFIRMED",
-      "startAt": "2026-06-17T09:00:00-04:00",
-      "endAt": "2026-06-17T09:30:00-04:00",
+      "startAt": "2026-06-17T13:00:00Z",
+      "endAt": "2026-06-17T13:30:00Z",
       "notes": "Quiero corte bajo",
       "createdAt": "2026-06-17T12:00:00Z",
       "history": [
@@ -1155,6 +1181,8 @@ Errores:
 
 Crea un bloqueo manual. Solo usuarios internos. El bloqueo nace con estado `ACTIVE`
 y excluye esa franja del motor de disponibilidad desde el momento en que se crea.
+El request puede usar offset local; la respuesta devuelve `startAt` y `endAt` en
+UTC.
 
 Reglas de acceso:
 
@@ -1184,8 +1212,8 @@ Response:
     "tenantId": "uuid",
     "branchId": "uuid",
     "resourceId": "uuid",
-    "startAt": "2026-06-17T13:00:00-04:00",
-    "endAt": "2026-06-17T15:00:00-04:00",
+    "startAt": "2026-06-17T17:00:00Z",
+    "endAt": "2026-06-17T19:00:00Z",
     "reason": "Silla en mantenimiento",
     "blockType": "manual",
     "status": "ACTIVE",

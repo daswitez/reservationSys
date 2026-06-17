@@ -229,7 +229,10 @@ public sealed class ReservationsEndpointTests(BookingApiFactory factory)
         using var payload = await response.Content.ReadFromJsonAsync<JsonDocument>();
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        Assert.Equal(reservationId, payload!.RootElement.GetProperty("data").GetProperty("reservationId").GetGuid());
+        var data = payload!.RootElement.GetProperty("data");
+        Assert.Equal(reservationId, data.GetProperty("reservationId").GetGuid());
+        Assert.Equal(TimeSpan.FromHours(-4), data.GetProperty("startAt").GetDateTimeOffset().Offset);
+        Assert.Equal(TimeSpan.FromHours(-4), data.GetProperty("endAt").GetDateTimeOffset().Offset);
     }
 
     [Fact]
@@ -333,7 +336,10 @@ public sealed class ReservationsEndpointTests(BookingApiFactory factory)
         using var payload = await response.Content.ReadFromJsonAsync<JsonDocument>();
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        Assert.Equal("CANCELLED", payload!.RootElement.GetProperty("data").GetProperty("status").GetString());
+        var data = payload!.RootElement.GetProperty("data");
+        Assert.Equal("CANCELLED", data.GetProperty("status").GetString());
+        Assert.Equal(TimeSpan.FromHours(-4), data.GetProperty("startAt").GetDateTimeOffset().Offset);
+        Assert.Equal(TimeSpan.FromHours(-4), data.GetProperty("endAt").GetDateTimeOffset().Offset);
 
         await using var scope = _factory.Services.CreateAsyncScope();
         var dbContext = scope.ServiceProvider.GetRequiredService<BookingDbContext>();

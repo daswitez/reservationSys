@@ -2,6 +2,7 @@ using System.Text;
 using Cassandra;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.IdentityModel.Tokens;
+using Microsoft.OpenApi;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -28,6 +29,24 @@ builder.Services.AddSingleton<Cassandra.ISession>(sp =>
 
 builder.Services.AddControllers();
 builder.Services.AddHealthChecks();
+builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddSwaggerGen(options =>
+{
+    options.SwaggerDoc("v1", new OpenApiInfo
+    {
+        Title = "Reservas - Reporting API",
+        Version = "v1",
+        Description = "Reportes agregados e ingesta interna de eventos para el sistema de reservas."
+    });
+
+    options.AddSecurityDefinition("Bearer", new OpenApiSecurityScheme
+    {
+        Type = SecuritySchemeType.Http,
+        Scheme = "bearer",
+        BearerFormat = "JWT",
+        Description = "Introduce un JWT valido. Swagger agrega automaticamente el prefijo Bearer."
+    });
+});
 builder.Services.AddHttpClient("IdentityValidation", client =>
     client.BaseAddress = new Uri(builder.Configuration["Services:IdentityBaseUrl"]
         ?? throw new InvalidOperationException("Services:IdentityBaseUrl is required.")));
@@ -67,6 +86,14 @@ builder.Services.AddAuthorizationBuilder()
         .RequireClaim("tenant_id"));
 
 var app = builder.Build();
+
+app.UseSwagger();
+app.UseSwaggerUI(options =>
+{
+    options.SwaggerEndpoint("/swagger/v1/swagger.json", "Reporting API v1");
+    options.RoutePrefix = "swagger";
+    options.DocumentTitle = "Reservas - Reporting API";
+});
 
 app.UseAuthentication();
 app.UseAuthorization();

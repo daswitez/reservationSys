@@ -100,6 +100,14 @@ public sealed class AgendaEndpointTests(BookingApiFactory factory)
         Assert.Equal(setup.BranchId, data.GetProperty("branchId").GetGuid());
         Assert.Equal(1, data.GetProperty("reservations").GetArrayLength());
         Assert.Equal(1, data.GetProperty("blocks").GetArrayLength());
+
+        var reservation = data.GetProperty("reservations")[0];
+        Assert.EndsWith("09:00:00-04:00", reservation.GetProperty("startAt").GetString(), StringComparison.Ordinal);
+        Assert.EndsWith("09:30:00-04:00", reservation.GetProperty("endAt").GetString(), StringComparison.Ordinal);
+
+        var block = data.GetProperty("blocks")[0];
+        Assert.EndsWith("12:00:00-04:00", block.GetProperty("startAt").GetString(), StringComparison.Ordinal);
+        Assert.EndsWith("14:00:00-04:00", block.GetProperty("endAt").GetString(), StringComparison.Ordinal);
     }
 
     [Fact]

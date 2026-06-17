@@ -1,7 +1,7 @@
-using System.Security.Claims;
 using BookingService.Common;
 using BookingService.Data;
 using BookingService.Features.Agenda;
+using BookingService.Security;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -10,7 +10,9 @@ namespace BookingService.Controllers;
 
 [ApiController]
 [Produces("application/json")]
-public sealed class AgendaController(BookingDbContext dbContext) : ControllerBase
+public sealed class AgendaController(
+    BookingDbContext dbContext,
+    BookingAuthorizationService authorization) : ControllerBase
 {
     /// <summary>
     /// Retorna la agenda de una sucursal para una fecha: reservas activas y bloqueos.
@@ -31,16 +33,16 @@ public sealed class AgendaController(BookingDbContext dbContext) : ControllerBas
         [FromQuery] string? status = null,
         CancellationToken cancellationToken = default)
     {
-        if (!TryGetUserId(out _))
+        if (!authorization.TryGetUserId(User, out _))
         {
             return Unauthorized(ApiResponse<object>.Failure(
                 "UNAUTHORIZED",
                 "El JWT no contiene user_id valido."));
         }
 
-        if (User.IsInRole("client"))
+        if (!authorization.EnsureInternalUser(User, out var internalFailure))
         {
-            return Forbid();
+            return internalFailure!;
         }
 
         if (branchId == Guid.Empty)
@@ -65,18 +67,9 @@ public sealed class AgendaController(BookingDbContext dbContext) : ControllerBas
                 $"No existe una sucursal activa '{branchId}'."));
         }
 
-        if (!User.IsInRole("super_admin"))
+        if (!authorization.CanAccessBranch(User, branch.TenantId, branch.BranchId, out var failure))
         {
-            var tenantIdClaim = User.FindFirstValue("tenant_id");
-            if (!Guid.TryParse(tenantIdClaim, out var tenantId) || branch.TenantId != tenantId)
-                return Forbid();
-        }
-
-        if (User.IsInRole("branch_admin"))
-        {
-            var branchIdClaim = User.FindFirstValue("branch_id");
-            if (!Guid.TryParse(branchIdClaim, out var claimBranchId) || claimBranchId != branchId)
-                return Forbid();
+            return failure!;
         }
 
         var tz = FindTimeZone(branch.Timezone);
@@ -100,18 +93,21 @@ public sealed class AgendaController(BookingDbContext dbContext) : ControllerBas
         if (!string.IsNullOrWhiteSpace(status))
             reservationsQuery = reservationsQuery.Where(r => r.Status == status.Trim().ToUpperInvariant());
 
-        var reservations = await reservationsQuery
+        var reservationEntities = await reservationsQuery
             .OrderBy(r => r.StartAt)
+            .ToListAsync(cancellationToken);
+
+        var reservations = reservationEntities
             .Select(r => new AgendaReservationItem(
                 r.ReservationId,
                 r.ResourceId,
                 r.ServiceId,
                 r.ClientUserId,
                 r.Status,
-                r.StartAt,
-                r.EndAt,
+                TimeZoneInfo.ConvertTime(r.StartAt, tz),
+                TimeZoneInfo.ConvertTime(r.EndAt, tz),
                 r.Notes))
-            .ToListAsync(cancellationToken);
+            .ToList();
 
         var blocksQuery = dbContext.ResourceBlocks
             .AsNoTracking()
@@ -123,29 +119,26 @@ public sealed class AgendaController(BookingDbContext dbContext) : ControllerBas
         if (resourceId.HasValue)
             blocksQuery = blocksQuery.Where(b => b.ResourceId == resourceId.Value);
 
-        var blocks = await blocksQuery
+        var blockEntities = await blocksQuery
             .OrderBy(b => b.StartAt)
+            .ToListAsync(cancellationToken);
+
+        var blocks = blockEntities
             .Select(b => new AgendaBlockItem(
                 b.BlockId,
                 b.ResourceId,
                 b.Reason,
                 b.BlockType,
                 b.Status,
-                b.StartAt,
-                b.EndAt))
-            .ToListAsync(cancellationToken);
+                TimeZoneInfo.ConvertTime(b.StartAt, tz),
+                TimeZoneInfo.ConvertTime(b.EndAt, tz)))
+            .ToList();
 
         return Ok(ApiResponse<AgendaResponse>.Ok(new AgendaResponse(
             parsedDate,
             branchId,
             reservations,
             blocks)));
-    }
-
-    private bool TryGetUserId(out Guid userId)
-    {
-        var value = User.FindFirstValue("user_id");
-        return Guid.TryParse(value, out userId);
     }
 
     private static BadRequestObjectResult ValidationError(string message) =>

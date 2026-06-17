@@ -2,6 +2,7 @@ using System.Text;
 using BookingService.Common;
 using BookingService.Data;
 using BookingService.Features.Outbox;
+using BookingService.Security;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -52,6 +53,7 @@ builder.Services.AddSwaggerGen(options =>
 });
 builder.Services.AddDbContext<BookingDbContext>(options =>
     options.UseNpgsql(builder.Configuration.GetConnectionString("Postgres")));
+builder.Services.AddScoped<BookingAuthorizationService>();
 builder.Services.AddHttpClient("IdentityValidation", client =>
     client.BaseAddress = new Uri(builder.Configuration["Services:IdentityBaseUrl"]
         ?? throw new InvalidOperationException("Services:IdentityBaseUrl is required.")));

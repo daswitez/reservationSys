@@ -265,6 +265,30 @@ public sealed class ResourceBlocksEndpointTests(BookingApiFactory factory)
     }
 
     [Fact]
+    public async Task Client_CannotGetBlock_ReturnsForbidden()
+    {
+        var setup = await CreateBlockSetupAsync();
+        var blockId = await CreateBlockInDbAsync(setup);
+
+        using var request = GetBlockRequest(blockId, "client", Guid.NewGuid());
+        using var response = await _client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task TenantAdmin_CannotGetBlockInOtherTenant_ReturnsForbidden()
+    {
+        var setup = await CreateBlockSetupAsync();
+        var blockId = await CreateBlockInDbAsync(setup);
+
+        using var request = GetBlockRequest(blockId, "tenant_admin", Guid.NewGuid(), Guid.NewGuid());
+        using var response = await _client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    [Fact]
     public async Task BranchAdmin_CannotGetBlockInOtherBranch_ReturnsForbidden()
     {
         var setup = await CreateBlockSetupAsync();

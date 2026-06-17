@@ -1,11 +1,11 @@
 using System.Data;
 using System.Globalization;
-using System.Security.Claims;
 using System.Text.Json;
 using BookingService.Common;
 using BookingService.Data;
 using BookingService.Domain;
 using BookingService.Features.Reservations;
+using BookingService.Security;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.ModelBinding;
@@ -16,7 +16,9 @@ namespace BookingService.Controllers;
 
 [ApiController]
 [Produces("application/json")]
-public sealed class ReservationsController(BookingDbContext dbContext) : ControllerBase
+public sealed class ReservationsController(
+    BookingDbContext dbContext,
+    BookingAuthorizationService authorization) : ControllerBase
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
@@ -33,7 +35,7 @@ public sealed class ReservationsController(BookingDbContext dbContext) : Control
         [FromBody] CreateReservationRequest request,
         CancellationToken cancellationToken)
     {
-        if (!TryGetUserId(out var clientUserId))
+        if (!authorization.TryGetUserId(User, out var clientUserId))
         {
             return Unauthorized(ApiResponse<object>.Failure(
                 "UNAUTHORIZED",
@@ -274,12 +276,13 @@ public sealed class ReservationsController(BookingDbContext dbContext) : Control
                 $"No existe la reserva '{reservationId}'."));
         }
 
-        if (!CanAccessReservation(reservation, allowClient: true, out var failure))
+        if (!authorization.CanAccessReservation(User, reservation, allowClient: true, out var failure))
         {
             return failure!;
         }
 
-        return Ok(ApiResponse<ReservationResponse>.Ok(ToResponse(reservation)));
+        return Ok(ApiResponse<ReservationResponse>.Ok(
+            await ToBranchTimeResponseAsync(reservation, cancellationToken)));
     }
 
     /// <summary>Cancela una reserva confirmada. El cliente solo puede cancelar la propia.</summary>
@@ -295,7 +298,7 @@ public sealed class ReservationsController(BookingDbContext dbContext) : Control
         [FromBody(EmptyBodyBehavior = EmptyBodyBehavior.Allow)] CancelReservationRequest? request,
         CancellationToken cancellationToken)
     {
-        if (!TryGetUserId(out var userId))
+        if (!authorization.TryGetUserId(User, out var userId))
         {
             return Unauthorized(ApiResponse<object>.Failure(
                 "UNAUTHORIZED",
@@ -312,7 +315,7 @@ public sealed class ReservationsController(BookingDbContext dbContext) : Control
                 $"No existe la reserva '{reservationId}'."));
         }
 
-        if (!CanAccessReservation(reservation, allowClient: true, out var failure))
+        if (!authorization.CanAccessReservation(User, reservation, allowClient: true, out var failure))
         {
             return failure!;
         }
@@ -356,7 +359,8 @@ public sealed class ReservationsController(BookingDbContext dbContext) : Control
 
         await dbContext.SaveChangesAsync(cancellationToken);
 
-        return Ok(ApiResponse<ReservationResponse>.Ok(ToResponse(reservation)));
+        return Ok(ApiResponse<ReservationResponse>.Ok(
+            await ToBranchTimeResponseAsync(reservation, cancellationToken)));
     }
 
     /// <summary>Marca una reserva como atendida. Solo usuarios internos (tenant_admin, branch_admin, super_admin).</summary>
@@ -369,11 +373,16 @@ public sealed class ReservationsController(BookingDbContext dbContext) : Control
     [ProducesResponseType(typeof(ApiResponse<object>), StatusCodes.Status409Conflict)]
     public async Task<IActionResult> Attend(Guid reservationId, CancellationToken cancellationToken)
     {
-        if (!TryGetUserId(out var userId))
+        if (!authorization.TryGetUserId(User, out var userId))
         {
             return Unauthorized(ApiResponse<object>.Failure(
                 "UNAUTHORIZED",
                 "El JWT no contiene user_id valido."));
+        }
+
+        if (!authorization.EnsureInternalUser(User, out var internalFailure))
+        {
+            return internalFailure!;
         }
 
         var reservation = await dbContext.Reservations
@@ -386,7 +395,7 @@ public sealed class ReservationsController(BookingDbContext dbContext) : Control
                 $"No existe la reserva '{reservationId}'."));
         }
 
-        if (!CanAccessReservation(reservation, allowClient: false, out var failure))
+        if (!authorization.CanAccessReservation(User, reservation, allowClient: false, out var failure))
         {
             return failure!;
         }
@@ -429,7 +438,8 @@ public sealed class ReservationsController(BookingDbContext dbContext) : Control
 
         await dbContext.SaveChangesAsync(cancellationToken);
 
-        return Ok(ApiResponse<ReservationResponse>.Ok(ToResponse(reservation)));
+        return Ok(ApiResponse<ReservationResponse>.Ok(
+            await ToBranchTimeResponseAsync(reservation, cancellationToken)));
     }
 
     /// <summary>Marca que el cliente no asistió. Solo usuarios internos (tenant_admin, branch_admin, super_admin).</summary>
@@ -442,11 +452,16 @@ public sealed class ReservationsController(BookingDbContext dbContext) : Control
     [ProducesResponseType(typeof(ApiResponse<object>), StatusCodes.Status409Conflict)]
     public async Task<IActionResult> NoShow(Guid reservationId, CancellationToken cancellationToken)
     {
-        if (!TryGetUserId(out var userId))
+        if (!authorization.TryGetUserId(User, out var userId))
         {
             return Unauthorized(ApiResponse<object>.Failure(
                 "UNAUTHORIZED",
                 "El JWT no contiene user_id valido."));
+        }
+
+        if (!authorization.EnsureInternalUser(User, out var internalFailure))
+        {
+            return internalFailure!;
         }
 
         var reservation = await dbContext.Reservations
@@ -459,7 +474,7 @@ public sealed class ReservationsController(BookingDbContext dbContext) : Control
                 $"No existe la reserva '{reservationId}'."));
         }
 
-        if (!CanAccessReservation(reservation, allowClient: false, out var failure))
+        if (!authorization.CanAccessReservation(User, reservation, allowClient: false, out var failure))
         {
             return failure!;
         }
@@ -502,7 +517,8 @@ public sealed class ReservationsController(BookingDbContext dbContext) : Control
 
         await dbContext.SaveChangesAsync(cancellationToken);
 
-        return Ok(ApiResponse<ReservationResponse>.Ok(ToResponse(reservation)));
+        return Ok(ApiResponse<ReservationResponse>.Ok(
+            await ToBranchTimeResponseAsync(reservation, cancellationToken)));
     }
 
     /// <summary>
@@ -526,16 +542,16 @@ public sealed class ReservationsController(BookingDbContext dbContext) : Control
         [FromQuery] string? dateTo = null,
         CancellationToken cancellationToken = default)
     {
-        if (!TryGetUserId(out _))
+        if (!authorization.TryGetUserId(User, out _))
         {
             return Unauthorized(ApiResponse<object>.Failure(
                 "UNAUTHORIZED",
                 "El JWT no contiene user_id valido."));
         }
 
-        if (User.IsInRole("client"))
+        if (!authorization.EnsureInternalUser(User, out var internalFailure))
         {
-            return Forbid();
+            return internalFailure!;
         }
 
         DateOnly? parsedDateFrom = null;
@@ -567,24 +583,18 @@ public sealed class ReservationsController(BookingDbContext dbContext) : Control
 
         if (!User.IsInRole("super_admin"))
         {
-            var tenantIdClaim = User.FindFirstValue("tenant_id");
-            if (!Guid.TryParse(tenantIdClaim, out var tenantId))
+            if (!authorization.TryGetTenantId(User, out var tenantId, out var failure))
             {
-                return Unauthorized(ApiResponse<object>.Failure(
-                    "UNAUTHORIZED",
-                    "El JWT no contiene tenant_id valido."));
+                return failure!;
             }
             query = query.Where(r => r.TenantId == tenantId);
         }
 
         if (User.IsInRole("branch_admin"))
         {
-            var claimBranchId = User.FindFirstValue("branch_id");
-            if (!Guid.TryParse(claimBranchId, out var assignedBranchId))
+            if (!authorization.TryGetBranchId(User, out var assignedBranchId, out var failure))
             {
-                return Unauthorized(ApiResponse<object>.Failure(
-                    "UNAUTHORIZED",
-                    "El JWT no contiene branch_id valido."));
+                return failure!;
             }
             query = query.Where(r => r.BranchId == assignedBranchId);
         }
@@ -777,95 +787,6 @@ public sealed class ReservationsController(BookingDbContext dbContext) : Control
         return new ResourceSelection(null, anyBlocked ? UnavailableReason.Blocked : UnavailableReason.Taken);
     }
 
-    private bool TryGetUserId(out Guid userId)
-    {
-        var value = User.FindFirstValue("user_id");
-        return Guid.TryParse(value, out userId);
-    }
-
-    private bool CanAccessReservation(
-        Reservation reservation,
-        bool allowClient,
-        out IActionResult? failure)
-    {
-        failure = null;
-
-        if (User.IsInRole("super_admin"))
-        {
-            return true;
-        }
-
-        if (User.IsInRole("client"))
-        {
-            if (!allowClient)
-            {
-                failure = Forbid();
-                return false;
-            }
-
-            if (!TryGetUserId(out var userId))
-            {
-                failure = Unauthorized(ApiResponse<object>.Failure(
-                    "UNAUTHORIZED",
-                    "El JWT no contiene user_id valido."));
-                return false;
-            }
-
-            if (reservation.ClientUserId == userId)
-            {
-                return true;
-            }
-
-            failure = Forbid();
-            return false;
-        }
-
-        if (User.IsInRole("branch_admin"))
-        {
-            var tenantIdClaim = User.FindFirstValue("tenant_id");
-            var branchIdClaim = User.FindFirstValue("branch_id");
-            if (!Guid.TryParse(tenantIdClaim, out var tenantId) ||
-                !Guid.TryParse(branchIdClaim, out var branchId))
-            {
-                failure = Unauthorized(ApiResponse<object>.Failure(
-                    "UNAUTHORIZED",
-                    "El JWT no contiene tenant_id o branch_id valido."));
-                return false;
-            }
-
-            if (reservation.TenantId == tenantId && reservation.BranchId == branchId)
-            {
-                return true;
-            }
-
-            failure = Forbid();
-            return false;
-        }
-
-        if (User.IsInRole("tenant_admin"))
-        {
-            var tenantIdClaim = User.FindFirstValue("tenant_id");
-            if (!Guid.TryParse(tenantIdClaim, out var tenantId))
-            {
-                failure = Unauthorized(ApiResponse<object>.Failure(
-                    "UNAUTHORIZED",
-                    "El JWT no contiene tenant_id valido."));
-                return false;
-            }
-
-            if (reservation.TenantId == tenantId)
-            {
-                return true;
-            }
-
-            failure = Forbid();
-            return false;
-        }
-
-        failure = Forbid();
-        return false;
-    }
-
     private static BadRequestObjectResult ValidationError(string message) =>
         new(ApiResponse<object>.Failure("VALIDATION_ERROR", message));
 
@@ -992,19 +913,22 @@ public sealed class ReservationsController(BookingDbContext dbContext) : Control
         return JsonSerializer.Serialize(payload, JsonOptions);
     }
 
-    private static ReservationResponse ToResponse(Reservation reservation) =>
-        new(
-            reservation.ReservationId,
-            reservation.TenantId,
-            reservation.BranchId,
-            reservation.ServiceId,
-            reservation.ResourceId,
-            reservation.ClientUserId,
-            reservation.Status,
-            reservation.StartAt,
-            reservation.EndAt,
-            reservation.Notes,
-            reservation.CreatedAt);
+    private async Task<ReservationResponse> ToBranchTimeResponseAsync(
+        Reservation reservation,
+        CancellationToken cancellationToken)
+    {
+        var timezone = await dbContext.Branches
+            .AsNoTracking()
+            .Where(branch => branch.BranchId == reservation.BranchId)
+            .Select(branch => branch.Timezone)
+            .SingleOrDefaultAsync(cancellationToken);
+
+        var timeZoneInfo = timezone is null ? TimeZoneInfo.Utc : FindTimeZone(timezone);
+        return ToResponse(
+            reservation,
+            TimeZoneInfo.ConvertTime(reservation.StartAt, timeZoneInfo),
+            TimeZoneInfo.ConvertTime(reservation.EndAt, timeZoneInfo));
+    }
 
     private static ReservationResponse ToResponse(
         Reservation reservation,
