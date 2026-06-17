@@ -933,11 +933,43 @@ Errores posibles:
 - `404 RESOURCE_NOT_FOUND`
 - `400 VALIDATION_ERROR`
 
+### GET /reservations/{reservationId}
+
+Devuelve el detalle de una reserva. Cualquier usuario autenticado puede consultar
+por ID; la autorización por tenant o propietario no se aplica en esta lectura.
+
+Response:
+
+```json
+{
+  "success": true,
+  "data": {
+    "reservationId": "uuid",
+    "tenantId": "uuid",
+    "branchId": "uuid",
+    "serviceId": "uuid",
+    "resourceId": "uuid",
+    "clientUserId": "uuid",
+    "status": "CONFIRMED",
+    "startAt": "2026-06-17T09:00:00-04:00",
+    "endAt": "2026-06-17T09:30:00-04:00",
+    "notes": "Quiero corte bajo",
+    "createdAt": "2026-06-17T12:00:00Z"
+  },
+  "error": null
+}
+```
+
+Errores:
+
+- `404 RESERVATION_NOT_FOUND` si el ID no existe.
+
 ### PATCH /reservations/{reservationId}/cancel
 
-Cancela reserva simple.
+Cancela una reserva confirmada. El cliente solo puede cancelar su propia reserva;
+usuarios internos pueden cancelar cualquier reserva de su tenant.
 
-Request:
+Request (`reason` opcional):
 
 ```json
 {
@@ -945,32 +977,150 @@ Request:
 }
 ```
 
-No hay políticas de cancelación. Si la reserva existe y está confirmada, se cancela.
+Response: mismo schema que `POST /reservations` con `status: "CANCELLED"`.
+
+Errores:
+
+- `404 RESERVATION_NOT_FOUND`
+- `409 INVALID_STATUS_TRANSITION` si la reserva ya está cancelada, atendida o no-show.
+- `403` si el cliente intenta cancelar una reserva ajena.
 
 ### PATCH /reservations/{reservationId}/attend
 
-Marca reserva como atendida. Solo usuarios internos.
+Marca la reserva como `ATTENDED`. Solo usuarios internos (`tenant_admin`, `branch_admin`).
+
+Response: mismo schema que `POST /reservations` con `status: "ATTENDED"`.
+
+Errores:
+
+- `404 RESERVATION_NOT_FOUND`
+- `409 INVALID_STATUS_TRANSITION` si la reserva no está en estado `CONFIRMED`.
 
 ### PATCH /reservations/{reservationId}/no-show
 
-Marca reserva como no-show. Solo usuarios internos.
+Marca la reserva como `NO_SHOW`. Solo usuarios internos.
+
+Response: mismo schema que `POST /reservations` con `status: "NO_SHOW"`.
+
+Errores:
+
+- `404 RESERVATION_NOT_FOUND`
+- `409 INVALID_STATUS_TRANSITION` si la reserva no está en estado `CONFIRMED`.
+
+### GET /admin/reservations
+
+Busca reservas con filtros. Solo usuarios internos (`client` recibe `403`).
+`tenant_admin` ve todas las reservas de su tenant; `branch_admin` está restringido
+a su sucursal del claim. `super_admin` ve todas. Máximo 200 resultados, ordenados
+por `startAt` descendente. Cada reserva incluye su historial de estado.
+
+Query params (todos opcionales):
+
+```txt
+clientUserId=uuid
+branchId=uuid
+serviceId=uuid
+resourceId=uuid
+status=CONFIRMED|CANCELLED|ATTENDED|NO_SHOW
+dateFrom=2026-06-01
+dateTo=2026-06-30
+```
+
+Response:
+
+```json
+{
+  "success": true,
+  "data": [
+    {
+      "reservationId": "uuid",
+      "tenantId": "uuid",
+      "branchId": "uuid",
+      "serviceId": "uuid",
+      "resourceId": "uuid",
+      "clientUserId": "uuid",
+      "status": "CONFIRMED",
+      "startAt": "2026-06-17T09:00:00-04:00",
+      "endAt": "2026-06-17T09:30:00-04:00",
+      "notes": "Quiero corte bajo",
+      "createdAt": "2026-06-17T12:00:00Z",
+      "history": [
+        {
+          "action": "CREATED",
+          "previousStatus": null,
+          "newStatus": "CONFIRMED",
+          "reason": null,
+          "userId": "uuid",
+          "createdAt": "2026-06-17T12:00:00Z"
+        }
+      ]
+    }
+  ],
+  "error": null
+}
+```
 
 ### GET /admin/agenda
+
+Devuelve reservas activas y bloqueos activos de una sucursal para un día completo,
+respetando el timezone de la sucursal. `branch_admin` solo puede consultar su propia
+sucursal (validado contra el claim `branch_id`).
 
 Query params:
 
 ```txt
-branchId=uuid
-date=2026-06-12
-resourceId=uuid opcional
-status=CONFIRMED opcional
+branchId=uuid        (requerido)
+date=2026-06-17      (requerido, formato yyyy-MM-dd)
+resourceId=uuid      (opcional)
+serviceId=uuid       (opcional)
+status=CONFIRMED     (opcional, filtra solo reservas)
 ```
 
-Devuelve reservas y bloqueos del día.
+Response:
+
+```json
+{
+  "success": true,
+  "data": {
+    "date": "2026-06-17",
+    "branchId": "uuid",
+    "reservations": [
+      {
+        "reservationId": "uuid",
+        "resourceId": "uuid",
+        "serviceId": "uuid",
+        "clientUserId": "uuid",
+        "status": "CONFIRMED",
+        "startAt": "2026-06-17T09:00:00-04:00",
+        "endAt": "2026-06-17T09:30:00-04:00",
+        "notes": null
+      }
+    ],
+    "blocks": [
+      {
+        "blockId": "uuid",
+        "resourceId": "uuid",
+        "reason": "Mantenimiento",
+        "blockType": "manual",
+        "status": "ACTIVE",
+        "startAt": "2026-06-17T13:00:00-04:00",
+        "endAt": "2026-06-17T15:00:00-04:00"
+      }
+    ]
+  },
+  "error": null
+}
+```
+
+Errores:
+
+- `400 VALIDATION_ERROR` si falta `branchId` o `date` tiene formato incorrecto.
+- `404 BRANCH_NOT_FOUND` si la sucursal no existe o no está activa.
 
 ### POST /resource-blocks
 
-Crea bloqueo manual.
+Crea un bloqueo manual. Solo usuarios internos. El bloqueo nace con estado `ACTIVE`
+y excluye esa franja del motor de disponibilidad desde el momento en que se crea.
 
 Request:
 
@@ -978,93 +1128,275 @@ Request:
 {
   "branchId": "uuid",
   "resourceId": "uuid",
-  "startAt": "2026-06-12T13:00:00-04:00",
-  "endAt": "2026-06-12T15:00:00-04:00",
+  "startAt": "2026-06-17T13:00:00-04:00",
+  "endAt": "2026-06-17T15:00:00-04:00",
   "reason": "Silla en mantenimiento",
   "blockType": "manual"
 }
-```
-
-### PATCH /resource-blocks/{blockId}/cancel
-
-Cancela un bloqueo manual.
-
-## Reporting Service
-
-Base URL local del entorno Docker actual: `http://localhost:5204`
-
-Reporting lee desde Cassandra. Los reportes pueden tener unos segundos de retraso respecto a PostgreSQL.
-
-### GET /reports/daily-summary
-
-Query params:
-
-```txt
-date=2026-06-12
 ```
 
 Response:
 
 ```json
 {
-  "tenantId": "uuid",
-  "date": "2026-06-12",
-  "totalCreated": 20,
-  "totalConfirmed": 14,
-  "totalCancelled": 3,
-  "totalAttended": 2,
-  "totalNoShow": 1,
-  "totalReservedMinutes": 600,
-  "updatedAt": "2026-06-12T20:00:00Z"
+  "success": true,
+  "data": {
+    "blockId": "uuid",
+    "tenantId": "uuid",
+    "branchId": "uuid",
+    "resourceId": "uuid",
+    "startAt": "2026-06-17T13:00:00-04:00",
+    "endAt": "2026-06-17T15:00:00-04:00",
+    "reason": "Silla en mantenimiento",
+    "blockType": "manual",
+    "status": "ACTIVE",
+    "createdByUserId": "uuid",
+    "createdAt": "2026-06-17T12:00:00Z"
+  },
+  "error": null
 }
 ```
 
-### GET /reports/branches/{branchId}/daily-summary
+Errores:
+
+- `404 RESOURCE_NOT_FOUND` si el recurso no existe o no pertenece a la sucursal.
+- `409 RESOURCE_BLOCKED` si ya existe un bloqueo activo en ese rango.
+
+### GET /resource-blocks/{blockId}
+
+Devuelve el detalle de un bloqueo. Solo usuarios internos. Response: mismo schema
+que `POST /resource-blocks`.
+
+Errores:
+
+- `404 BLOCK_NOT_FOUND` si el ID no existe.
+
+### PATCH /resource-blocks/{blockId}/cancel
+
+Cancela un bloqueo activo. Solo usuarios internos.
+
+Response: mismo schema que `POST /resource-blocks` con `status: "CANCELLED"`.
+
+Errores:
+
+- `404 BLOCK_NOT_FOUND`
+- `409 INVALID_STATUS_TRANSITION` si el bloqueo ya está cancelado.
+
+## Reporting Service
+
+Base URL local del entorno Docker actual: `http://localhost:5204`
+
+Reporting lee exclusivamente desde Cassandra (keyspace `reservas_reports`). Los datos tienen
+un retraso de segundos respecto a PostgreSQL (eventual consistency). Todos los endpoints
+requieren JWT de usuario interno; `client` recibe `403`. `super_admin` debe pasar `tenantId`
+como query param en todos los endpoints.
+
+Respuestas que pueden incluir `DataStatus`:
+
+- `"OK"` — Cassandra tiene datos para el período consultado.
+- `"PENDING_SYNC"` — Cassandra aún no tiene datos; el reporte puede estar desactualizado.
+
+### GET /reports/daily-summary
+
+Resumen de reservas del día para el tenant (o sucursal) indicados.
 
 Query params:
 
 ```txt
-from=2026-06-01
-to=2026-06-12
+date=2026-06-17          (requerido, formato yyyy-MM-dd)
+branchId=uuid            (opcional; filtra por sucursal)
+tenantId=uuid            (solo super_admin, requerido para ese rol)
 ```
 
-Devuelve resumen por día para una sucursal.
+Reglas de acceso:
 
-### GET /reports/services/top
+- `client` → `403`
+- `branch_admin` → si pasa `branchId`, debe coincidir con el claim `branch_id`; si no pasa `branchId`, se usa el claim automáticamente.
+- `tenant_admin` → `tenantId` se toma del JWT.
+- `super_admin` → debe pasar `tenantId` como query param.
 
-Query params:
+Response:
 
-```txt
-month=2026-06
+```json
+{
+  "success": true,
+  "data": {
+    "tenantId": "uuid",
+    "branchId": null,
+    "branchName": null,
+    "date": "2026-06-17",
+    "totalCreated": 20,
+    "totalConfirmed": 14,
+    "totalCancelled": 3,
+    "totalAttended": 2,
+    "totalNoShow": 1,
+    "totalReservedMinutes": 600,
+    "updatedAt": "2026-06-17T20:00:00Z",
+    "dataStatus": "OK"
+  },
+  "error": null
+}
 ```
 
-Devuelve ranking de servicios más reservados.
+Cuando `branchId` está presente en la consulta, `branchId` y `branchName` se pueblan en
+la respuesta. Si Cassandra no tiene datos, `dataStatus` es `"PENDING_SYNC"` y los conteos
+son `0`.
+
+Errores:
+
+- `400 VALIDATION_ERROR` si falta `date` o el formato es incorrecto.
+- `400 VALIDATION_ERROR` si `super_admin` no incluye `tenantId`.
 
 ### GET /reports/resources/occupancy
 
+Ocupación por recurso para una sucursal y período. No expone datos personales del cliente
+(la tabla Cassandra solo almacena conteos agregados).
+
 Query params:
 
 ```txt
-branchId=uuid
-date=2026-06-12
+branchId=uuid            (requerido)
+date=2026-06-17          (día único; alternativa a dateFrom/dateTo)
+dateFrom=2026-06-01      (inicio de rango)
+dateTo=2026-06-17        (fin de rango; máx 31 días desde dateFrom)
+tenantId=uuid            (solo super_admin)
 ```
 
-Devuelve ocupación por recurso.
+Response:
+
+```json
+{
+  "success": true,
+  "data": [
+    {
+      "resourceId": "uuid",
+      "resourceName": "Silla 1",
+      "resourceType": "seat",
+      "date": "2026-06-17",
+      "totalReservations": 8,
+      "totalAttended": 6,
+      "totalCancelled": 1,
+      "totalNoShow": 1,
+      "reservedMinutes": 240,
+      "blockedMinutes": 120,
+      "updatedAt": "2026-06-17T20:00:00Z"
+    }
+  ],
+  "error": null
+}
+```
+
+Errores:
+
+- `400 VALIDATION_ERROR` si falta `branchId` o no se indica ningún parámetro de fecha.
+- `400 VALIDATION_ERROR` si `dateTo` < `dateFrom` o el rango excede 31 días.
+- `403` si `branch_admin` intenta acceder a una sucursal que no es la propia.
+
+### GET /reports/services/top
+
+Ranking de servicios por volumen de reservas. Agrega datos de múltiples meses en memoria
+antes de calcular el ranking.
+
+Query params:
+
+```txt
+month=2026-06            (mes único; alternativa a monthFrom/monthTo)
+monthFrom=2026-01        (inicio de rango, formato yyyy-MM)
+monthTo=2026-06          (fin de rango; máx 24 meses desde monthFrom)
+tenantId=uuid            (solo super_admin)
+```
+
+Response:
+
+```json
+{
+  "success": true,
+  "data": {
+    "periodFrom": "2026-01",
+    "periodTo": "2026-06",
+    "services": [
+      {
+        "rank": 1,
+        "serviceId": "uuid",
+        "serviceName": "Corte de cabello",
+        "totalCreated": 120,
+        "totalCancelled": 10,
+        "totalAttended": 95,
+        "totalNoShow": 15,
+        "totalReservedMinutes": 3600
+      },
+      {
+        "rank": 2,
+        "serviceId": "uuid",
+        "serviceName": "Tinte completo",
+        "totalCreated": 80,
+        "totalCancelled": 5,
+        "totalAttended": 70,
+        "totalNoShow": 5,
+        "totalReservedMinutes": 4800
+      }
+    ]
+  },
+  "error": null
+}
+```
+
+Ranking ordenado por `totalCreated` descendente. Si no hay datos, `services` es `[]`.
+
+Errores:
+
+- `400 VALIDATION_ERROR` si no se provee ningún parámetro de mes.
+- `400 VALIDATION_ERROR` si el formato de mes no es `yyyy-MM`.
+- `400 VALIDATION_ERROR` si `monthTo` < `monthFrom` o el rango excede 24 meses.
+- `400 VALIDATION_ERROR` si `super_admin` no incluye `tenantId`.
 
 ### GET /reports/peak-hours
 
+Distribución de reservas por hora del día. Si se consulta un rango de fechas, los conteos
+se acumulan por hora del día en memoria.
+
 Query params:
 
 ```txt
-branchId=uuid
-date=2026-06-12
+branchId=uuid            (requerido)
+date=2026-06-17          (día único; alternativa a dateFrom/dateTo)
+dateFrom=2026-06-01      (inicio de rango)
+dateTo=2026-06-17        (fin de rango; máx 31 días)
+tenantId=uuid            (solo super_admin)
 ```
 
-Devuelve cantidad de reservas por hora.
+Response:
+
+```json
+{
+  "success": true,
+  "data": {
+    "branchId": "uuid",
+    "periodFrom": "2026-06-17",
+    "periodTo": "2026-06-17",
+    "hours": [
+      { "hourOfDay": 9,  "totalCreated": 5, "totalAttended": 4, "totalCancelled": 1 },
+      { "hourOfDay": 10, "totalCreated": 8, "totalAttended": 7, "totalCancelled": 1 },
+      { "hourOfDay": 11, "totalCreated": 3, "totalAttended": 3, "totalCancelled": 0 }
+    ]
+  },
+  "error": null
+}
+```
+
+Solo aparecen las horas con actividad. Si no hay datos, `hours` es `[]`.
+
+Errores:
+
+- `400 VALIDATION_ERROR` si falta `branchId` o ningún parámetro de fecha.
+- `400 VALIDATION_ERROR` si el formato de fecha no es `yyyy-MM-dd`.
+- `400 VALIDATION_ERROR` si `dateTo` < `dateFrom` o el rango excede 31 días.
+- `403` si `branch_admin` intenta consultar una sucursal que no es la propia.
 
 ### POST /internal/report-events
 
-Endpoint interno usado por el outbox worker de Booking.
+Endpoint interno usado por el outbox worker de Booking. No requiere JWT de usuario;
+la autenticación servicio-a-servicio se define al implementar el worker.
 
 Request:
 
@@ -1072,14 +1404,14 @@ Request:
 {
   "eventId": "uuid",
   "eventType": "ReservationCreated",
-  "occurredAt": "2026-06-12T10:00:00Z",
+  "occurredAt": "2026-06-17T10:00:00Z",
   "tenantId": "uuid",
   "branchId": "uuid",
   "serviceId": "uuid",
   "resourceId": "uuid",
   "reservationId": "uuid",
-  "startAt": "2026-06-12T09:00:00-04:00",
-  "endAt": "2026-06-12T09:30:00-04:00",
+  "startAt": "2026-06-17T09:00:00-04:00",
+  "endAt": "2026-06-17T09:30:00-04:00",
   "status": "CONFIRMED",
   "durationMinutes": 30,
   "serviceName": "Corte de cabello",
@@ -1724,9 +2056,18 @@ curl -sS -X POST "$BOOKING_URL/reservations" \
   -d "{\"branchId\":\"$BRANCH_ID\",\"serviceId\":\"$SERVICE_ID\",\"resourceId\":\"$RESOURCE_ID\",\"startAt\":\"2026-06-17T09:00:00-04:00\",\"notes\":\"Reserva duplicada desde curl\"}" | jq
 ```
 
+#### GET /reservations/{reservationId}
+
+Estado: `IMPLEMENTADO` para HU-017. Autenticacion: cualquier JWT valido.
+
+```bash
+curl -sS "$BOOKING_URL/reservations/$RESERVATION_ID" \
+  -H "Authorization: Bearer $CLIENT_TOKEN" | jq
+```
+
 #### PATCH /reservations/{reservationId}/cancel
 
-Autenticacion esperada: cliente propietario o usuario interno autorizado.
+Estado: `IMPLEMENTADO` para HU-018. Autenticacion: cliente propietario o usuario interno.
 
 ```bash
 curl -i -X PATCH "$BOOKING_URL/reservations/$RESERVATION_ID/cancel" \
@@ -1737,7 +2078,7 @@ curl -i -X PATCH "$BOOKING_URL/reservations/$RESERVATION_ID/cancel" \
 
 #### PATCH /reservations/{reservationId}/attend
 
-Autenticacion esperada: usuario interno autorizado.
+Estado: `IMPLEMENTADO` para HU-019. Autenticacion: usuario interno.
 
 ```bash
 curl -i -X PATCH "$BOOKING_URL/reservations/$RESERVATION_ID/attend" \
@@ -1746,38 +2087,64 @@ curl -i -X PATCH "$BOOKING_URL/reservations/$RESERVATION_ID/attend" \
 
 #### PATCH /reservations/{reservationId}/no-show
 
-Autenticacion esperada: usuario interno autorizado.
+Estado: `IMPLEMENTADO` para HU-020. Autenticacion: usuario interno.
 
 ```bash
 curl -i -X PATCH "$BOOKING_URL/reservations/$RESERVATION_ID/no-show" \
   -H "Authorization: Bearer $TENANT_ADMIN_TOKEN"
 ```
 
-#### GET /admin/agenda
+#### GET /admin/reservations
 
-Autenticacion esperada: usuario interno autorizado.
+Estado: `IMPLEMENTADO` para HU-022. Autenticacion: usuario interno (client → 403).
+Busca reservas con filtros; incluye historial de estado por reserva.
 
 ```bash
-curl -i "$BOOKING_URL/admin/agenda?branchId=$BRANCH_ID&date=$TEST_DATE&resourceId=$RESOURCE_ID&status=CONFIRMED" \
-  -H "Authorization: Bearer $TENANT_ADMIN_TOKEN"
+curl -sS "$BOOKING_URL/admin/reservations?branchId=$BRANCH_ID&dateFrom=2026-06-01&dateTo=2026-06-30&status=CONFIRMED" \
+  -H "Authorization: Bearer $TENANT_ADMIN_TOKEN" | jq
+```
+
+Busqueda por cliente especifico:
+
+```bash
+curl -sS "$BOOKING_URL/admin/reservations?clientUserId=$CLIENT_ID" \
+  -H "Authorization: Bearer $TENANT_ADMIN_TOKEN" | jq
+```
+
+#### GET /admin/agenda
+
+Estado: `IMPLEMENTADO` para HU-021 (vista agenda). Autenticacion: usuario interno.
+
+```bash
+curl -sS "$BOOKING_URL/admin/agenda?branchId=$BRANCH_ID&date=$TEST_DATE&resourceId=$RESOURCE_ID&status=CONFIRMED" \
+  -H "Authorization: Bearer $TENANT_ADMIN_TOKEN" | jq
 ```
 
 #### POST /resource-blocks
 
-Autenticacion esperada: usuario interno autorizado.
+Estado: `IMPLEMENTADO` para HU-021. Autenticacion: usuario interno. Guardar `data.blockId` como `BLOCK_ID`.
 
 ```bash
-curl -i -X POST "$BOOKING_URL/resource-blocks" \
+export BLOCK_RESPONSE="$(curl -sS -X POST "$BOOKING_URL/resource-blocks" \
   -H "Authorization: Bearer $TENANT_ADMIN_TOKEN" \
   -H 'Content-Type: application/json' \
-  -d "{\"branchId\":\"$BRANCH_ID\",\"resourceId\":\"$RESOURCE_ID\",\"startAt\":\"2026-06-15T13:00:00-04:00\",\"endAt\":\"2026-06-15T15:00:00-04:00\",\"reason\":\"Mantenimiento de prueba\",\"blockType\":\"manual\"}"
+  -d "{\"branchId\":\"$BRANCH_ID\",\"resourceId\":\"$RESOURCE_ID\",\"startAt\":\"${TEST_DATE}T13:00:00-04:00\",\"endAt\":\"${TEST_DATE}T15:00:00-04:00\",\"reason\":\"Mantenimiento de prueba\",\"blockType\":\"manual\"}")"
+echo "$BLOCK_RESPONSE" | jq
+export BLOCK_ID="$(echo "$BLOCK_RESPONSE" | jq -r '.data.blockId')"
 ```
 
-Al implementarse, guardar `data.blockId` como `BLOCK_ID`.
+#### GET /resource-blocks/{blockId}
+
+Estado: `IMPLEMENTADO`. Autenticacion: usuario interno.
+
+```bash
+curl -sS "$BOOKING_URL/resource-blocks/$BLOCK_ID" \
+  -H "Authorization: Bearer $TENANT_ADMIN_TOKEN" | jq
+```
 
 #### PATCH /resource-blocks/{blockId}/cancel
 
-Autenticacion esperada: usuario interno autorizado.
+Estado: `IMPLEMENTADO` para HU-023. Autenticacion: usuario interno.
 
 ```bash
 curl -i -X PATCH "$BOOKING_URL/resource-blocks/$BLOCK_ID/cancel" \
@@ -1786,61 +2153,98 @@ curl -i -X PATCH "$BOOKING_URL/resource-blocks/$BLOCK_ID/cancel" \
 
 ### Reporting - comandos de contrato
 
-Todos los endpoints de esta seccion estan `PLANIFICADOS`; Reporting actualmente
-solo expone `/` y `/health`.
+Todos los endpoints de esta seccion estan `IMPLEMENTADOS` (HU-024 a HU-027).
+Reporting lee desde Cassandra (puerto 9142 en el entorno local Docker).
 
 #### GET /reports/daily-summary
 
-Autenticacion esperada: usuario interno del tenant.
+Estado: `IMPLEMENTADO` para HU-024. Autenticacion: usuario interno. Responde
+`dataStatus: "PENDING_SYNC"` si Cassandra no tiene datos para esa fecha.
 
 ```bash
-curl -i "$REPORTING_URL/reports/daily-summary?date=$TEST_DATE" \
-  -H "Authorization: Bearer $TENANT_ADMIN_TOKEN"
+curl -sS "$REPORTING_URL/reports/daily-summary?date=$TEST_DATE" \
+  -H "Authorization: Bearer $TENANT_ADMIN_TOKEN" | jq
 ```
 
-#### GET /reports/branches/{branchId}/daily-summary
-
-Autenticacion esperada: usuario interno autorizado para la sucursal.
+Con filtro de sucursal:
 
 ```bash
-curl -i "$REPORTING_URL/reports/branches/$BRANCH_ID/daily-summary?from=2026-06-01&to=2026-06-30" \
-  -H "Authorization: Bearer $TENANT_ADMIN_TOKEN"
+curl -sS "$REPORTING_URL/reports/daily-summary?date=$TEST_DATE&branchId=$BRANCH_ID" \
+  -H "Authorization: Bearer $TENANT_ADMIN_TOKEN" | jq
 ```
 
-#### GET /reports/services/top
-
-Autenticacion esperada: usuario interno del tenant.
+Como super_admin (requiere tenantId en query):
 
 ```bash
-curl -i "$REPORTING_URL/reports/services/top?month=2026-06" \
-  -H "Authorization: Bearer $TENANT_ADMIN_TOKEN"
+curl -sS "$REPORTING_URL/reports/daily-summary?date=$TEST_DATE&tenantId=$TENANT_ID" \
+  -H "Authorization: Bearer $SUPER_ADMIN_TOKEN" | jq
 ```
 
 #### GET /reports/resources/occupancy
 
-Autenticacion esperada: usuario interno autorizado.
+Estado: `IMPLEMENTADO` para HU-025. Autenticacion: usuario interno. No expone
+datos personales del cliente (solo conteos agregados).
 
 ```bash
-curl -i "$REPORTING_URL/reports/resources/occupancy?branchId=$BRANCH_ID&date=$TEST_DATE" \
-  -H "Authorization: Bearer $TENANT_ADMIN_TOKEN"
+curl -sS "$REPORTING_URL/reports/resources/occupancy?branchId=$BRANCH_ID&date=$TEST_DATE" \
+  -H "Authorization: Bearer $TENANT_ADMIN_TOKEN" | jq
+```
+
+Con rango de fechas (maximo 31 dias):
+
+```bash
+curl -sS "$REPORTING_URL/reports/resources/occupancy?branchId=$BRANCH_ID&dateFrom=2026-06-01&dateTo=2026-06-17" \
+  -H "Authorization: Bearer $TENANT_ADMIN_TOKEN" | jq
+```
+
+#### GET /reports/services/top
+
+Estado: `IMPLEMENTADO` para HU-026. Autenticacion: usuario interno. Ranking
+ordenado por `totalCreated` descendente.
+
+```bash
+curl -sS "$REPORTING_URL/reports/services/top?month=2026-06" \
+  -H "Authorization: Bearer $TENANT_ADMIN_TOKEN" | jq
+```
+
+Con rango mensual (maximo 24 meses, agrega en memoria):
+
+```bash
+curl -sS "$REPORTING_URL/reports/services/top?monthFrom=2026-01&monthTo=2026-06" \
+  -H "Authorization: Bearer $TENANT_ADMIN_TOKEN" | jq
 ```
 
 #### GET /reports/peak-hours
 
-Autenticacion esperada: usuario interno autorizado.
+Estado: `IMPLEMENTADO` para HU-027. Autenticacion: usuario interno. Devuelve
+solo horas con actividad; si se usa rango los conteos se acumulan por hora del dia.
 
 ```bash
-curl -i "$REPORTING_URL/reports/peak-hours?branchId=$BRANCH_ID&date=$TEST_DATE" \
-  -H "Authorization: Bearer $TENANT_ADMIN_TOKEN"
+curl -sS "$REPORTING_URL/reports/peak-hours?branchId=$BRANCH_ID&date=$TEST_DATE" \
+  -H "Authorization: Bearer $TENANT_ADMIN_TOKEN" | jq
+```
+
+Con rango de fechas:
+
+```bash
+curl -sS "$REPORTING_URL/reports/peak-hours?branchId=$BRANCH_ID&dateFrom=2026-06-01&dateTo=2026-06-17" \
+  -H "Authorization: Bearer $TENANT_ADMIN_TOKEN" | jq
+```
+
+Prueba de validacion (branchId faltante → 400):
+
+```bash
+curl -sS "$REPORTING_URL/reports/peak-hours?date=$TEST_DATE" \
+  -H "Authorization: Bearer $TENANT_ADMIN_TOKEN" | jq
 ```
 
 #### POST /internal/report-events
 
-Autenticacion esperada: llamada interna de Booking. El mecanismo de autenticacion
-servicio-a-servicio se definira al implementar Reporting.
+Estado: endpoint disponible pero el worker outbox de Booking aun no esta implementado.
+Autenticacion: llamada interna sin JWT de usuario.
 
 ```bash
 curl -i -X POST "$REPORTING_URL/internal/report-events" \
   -H 'Content-Type: application/json' \
-  -d "{\"eventId\":\"77777777-7777-7777-7777-777777777777\",\"eventType\":\"ReservationCreated\",\"occurredAt\":\"2026-06-15T13:00:00Z\",\"tenantId\":\"$TENANT_ID\",\"branchId\":\"$BRANCH_ID\",\"serviceId\":\"$SERVICE_ID\",\"resourceId\":\"$RESOURCE_ID\",\"reservationId\":\"88888888-8888-8888-8888-888888888888\",\"startAt\":\"2026-06-15T09:00:00-04:00\",\"endAt\":\"2026-06-15T09:30:00-04:00\",\"status\":\"CONFIRMED\",\"durationMinutes\":30,\"serviceName\":\"Corte de cabello\",\"branchName\":\"Sucursal Centro\",\"resourceName\":\"Silla 1\"}"
+  -d "{\"eventId\":\"77777777-7777-7777-7777-777777777777\",\"eventType\":\"ReservationCreated\",\"occurredAt\":\"${TEST_DATE}T13:00:00Z\",\"tenantId\":\"$TENANT_ID\",\"branchId\":\"$BRANCH_ID\",\"serviceId\":\"$SERVICE_ID\",\"resourceId\":\"$RESOURCE_ID\",\"reservationId\":\"88888888-8888-8888-8888-888888888888\",\"startAt\":\"${TEST_DATE}T09:00:00-04:00\",\"endAt\":\"${TEST_DATE}T09:30:00-04:00\",\"status\":\"CONFIRMED\",\"durationMinutes\":30,\"serviceName\":\"Corte de cabello\",\"branchName\":\"Sucursal Centro\",\"resourceName\":\"Silla 1\"}"
 ```

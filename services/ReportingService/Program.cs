@@ -1,8 +1,30 @@
 using System.Text;
+using Cassandra;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.IdentityModel.Tokens;
 
 var builder = WebApplication.CreateBuilder(args);
+
+// Cassandra — config is read lazily inside the lambda so test overrides (UseSetting) apply
+builder.Services.AddSingleton<ICluster>(sp =>
+{
+    var cfg = sp.GetRequiredService<IConfiguration>();
+    var contactPoints = cfg.GetSection("Cassandra:ContactPoints").Get<string[]>() ?? ["localhost"];
+    var port = cfg.GetValue<int>("Cassandra:Port", 9042);
+    var localDc = cfg["Cassandra:LocalDatacenter"] ?? "datacenter1";
+    return Cluster.Builder()
+        .AddContactPoints(contactPoints)
+        .WithPort(port)
+        .WithLoadBalancingPolicy(new DCAwareRoundRobinPolicy(localDc))
+        .Build();
+});
+
+builder.Services.AddSingleton<Cassandra.ISession>(sp =>
+{
+    var cfg = sp.GetRequiredService<IConfiguration>();
+    var keyspace = cfg["Cassandra:Keyspace"] ?? "reservas_reports";
+    return sp.GetRequiredService<ICluster>().Connect(keyspace);
+});
 
 builder.Services.AddControllers();
 builder.Services.AddHealthChecks();
@@ -88,3 +110,5 @@ static async Task ValidateWithIdentityAsync(TokenValidatedContext context)
         context.Fail("Identity is unavailable for token validation.");
     }
 }
+
+public partial class Program;

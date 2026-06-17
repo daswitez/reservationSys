@@ -337,3 +337,177 @@ curl --request DELETE --url "http://localhost:5202/branches/44444444-4444-4444-4
 ```
 curl --request DELETE --url "http://localhost:5202/services/55555555-5555-5555-5555-555555555555" --header "Authorization: Bearer PEGAR_TENANT_ADMIN_TOKEN"
 ```
+
+---
+
+## FASE 9 — Ciclo de reserva del cliente (Booking)
+
+### 34. Consultar disponibilidad `[Booking]`
+> Público, sin JWT. Devuelve slots libres para el servicio en la sucursal y fecha indicados. `2026-06-17` es miércoles y coincide con los horarios base seed de lun-vie.
+
+```
+curl --request GET --url "http://localhost:5203/availability?tenantSlug=peluqueria-demo&branchId=44444444-4444-4444-4444-444444444444&serviceId=55555555-5555-5555-5555-555555555555&date=2026-06-17"
+```
+
+---
+
+### 35. Crear reserva `[Booking]`
+> Requiere JWT de `client`. `Idempotency-Key` debe ser un UUID único por intento (en Postman: `{{$guid}}`). La respuesta incluye `reservationId` — guardarlo para los pasos siguientes.
+
+```
+curl --request POST --url "http://localhost:5203/reservations" --header "Authorization: Bearer PEGAR_CLIENT_TOKEN" --header "Content-Type: application/json" --header "Idempotency-Key: PEGAR_UUID_UNICO" --data "{\"branchId\":\"44444444-4444-4444-4444-444444444444\",\"serviceId\":\"55555555-5555-5555-5555-555555555555\",\"resourceId\":\"66666666-6666-6666-6666-666666666666\",\"startAt\":\"2026-06-17T09:00:00-04:00\",\"notes\":\"Reserva desde curl\"}"
+```
+
+---
+
+### 36. Ver detalle de reserva `[Booking]`
+> Cualquier usuario autenticado puede consultar una reserva por ID. Reemplazar `RESERVATION_ID` con el `reservationId` de la respuesta anterior.
+
+```
+curl --request GET --url "http://localhost:5203/reservations/RESERVATION_ID" --header "Authorization: Bearer PEGAR_CLIENT_TOKEN"
+```
+
+---
+
+### 37. Cancelar reserva (cliente) `[Booking]`
+> El cliente solo puede cancelar su propia reserva. `reason` es opcional.
+
+```
+curl --request PATCH --url "http://localhost:5203/reservations/RESERVATION_ID/cancel" --header "Authorization: Bearer PEGAR_CLIENT_TOKEN" --header "Content-Type: application/json" --data "{\"reason\":\"Cancelado desde curl\"}"
+```
+
+---
+
+## FASE 10 — Gestión admin de reservas (Booking)
+
+### 38. Buscar reservas (admin) `[Booking]`
+> Solo usuarios internos. Admite filtros: `branchId`, `clientUserId`, `serviceId`, `resourceId`, `status`, `dateFrom`, `dateTo`. Máximo 200 resultados, cada reserva incluye su historial de estado.
+
+```
+curl --request GET --url "http://localhost:5203/admin/reservations?branchId=44444444-4444-4444-4444-444444444444&dateFrom=2026-06-01&dateTo=2026-06-30&status=CONFIRMED" --header "Authorization: Bearer PEGAR_TENANT_ADMIN_TOKEN"
+```
+
+---
+
+### 39. Marcar reserva como atendida `[Booking]`
+> Solo usuarios internos. Cambia el estado a `ATTENDED`.
+
+```
+curl --request PATCH --url "http://localhost:5203/reservations/RESERVATION_ID/attend" --header "Authorization: Bearer PEGAR_TENANT_ADMIN_TOKEN"
+```
+
+---
+
+### 40. Marcar reserva como no-show `[Booking]`
+> Solo usuarios internos. Cambia el estado a `NO_SHOW`.
+
+```
+curl --request PATCH --url "http://localhost:5203/reservations/RESERVATION_ID/no-show" --header "Authorization: Bearer PEGAR_TENANT_ADMIN_TOKEN"
+```
+
+---
+
+## FASE 11 — Agenda diaria (Booking)
+
+### 41. Ver agenda del día `[Booking]`
+> Devuelve todas las reservas activas y bloqueos de la sucursal para la fecha indicada. Filtros opcionales: `resourceId`, `serviceId`, `status`. `branch_admin` solo puede consultar su propia sucursal.
+
+```
+curl --request GET --url "http://localhost:5203/admin/agenda?branchId=44444444-4444-4444-4444-444444444444&date=2026-06-17&resourceId=66666666-6666-6666-6666-666666666666&status=CONFIRMED" --header "Authorization: Bearer PEGAR_TENANT_ADMIN_TOKEN"
+```
+
+---
+
+## FASE 12 — Bloqueos de recursos (Booking)
+
+### 42. Crear bloqueo de recurso `[Booking]`
+> Solo usuarios internos. `blockType` acepta `manual` (u otros). La respuesta incluye `blockId` para los pasos siguientes.
+
+```
+curl --request POST --url "http://localhost:5203/resource-blocks" --header "Authorization: Bearer PEGAR_TENANT_ADMIN_TOKEN" --header "Content-Type: application/json" --data "{\"branchId\":\"44444444-4444-4444-4444-444444444444\",\"resourceId\":\"66666666-6666-6666-6666-666666666666\",\"startAt\":\"2026-06-17T13:00:00-04:00\",\"endAt\":\"2026-06-17T15:00:00-04:00\",\"reason\":\"Mantenimiento\",\"blockType\":\"manual\"}"
+```
+
+---
+
+### 43. Ver detalle de bloqueo `[Booking]`
+> Reemplazar `BLOCK_ID` con el `blockId` de la respuesta anterior.
+
+```
+curl --request GET --url "http://localhost:5203/resource-blocks/BLOCK_ID" --header "Authorization: Bearer PEGAR_TENANT_ADMIN_TOKEN"
+```
+
+---
+
+### 44. Cancelar bloqueo `[Booking]`
+> Cambia estado del bloqueo a `CANCELLED`. Devuelve el bloqueo actualizado.
+
+```
+curl --request PATCH --url "http://localhost:5203/resource-blocks/BLOCK_ID/cancel" --header "Authorization: Bearer PEGAR_TENANT_ADMIN_TOKEN"
+```
+
+---
+
+## FASE 13 — Reportes operativos (Reporting)
+
+> Reporting lee desde Cassandra. Los datos tienen un retraso de segundos respecto a PostgreSQL. Si Cassandra no tiene datos para la fecha/tenant indicados, los endpoints de resumen responden `DataStatus: "PENDING_SYNC"` en lugar de error.
+
+### 45. Resumen diario por tenant `[Reporting]`
+> Requiere JWT de admin interno. `date` en formato `yyyy-MM-dd`. `super_admin` debe agregar `tenantId=uuid` como query param.
+
+```
+curl --request GET --url "http://localhost:5204/reports/daily-summary?date=2026-06-17" --header "Authorization: Bearer PEGAR_TENANT_ADMIN_TOKEN"
+```
+
+---
+
+### 46. Resumen diario por sucursal `[Reporting]`
+> Filtra el resumen diario a una sucursal específica dentro del tenant.
+
+```
+curl --request GET --url "http://localhost:5204/reports/daily-summary?date=2026-06-17&branchId=44444444-4444-4444-4444-444444444444" --header "Authorization: Bearer PEGAR_TENANT_ADMIN_TOKEN"
+```
+
+---
+
+### 47. Ocupación por recurso `[Reporting]`
+> `branchId` requerido. Acepta `date` (día único) o `dateFrom`/`dateTo` (máx 31 días). No expone datos personales del cliente.
+
+```
+curl --request GET --url "http://localhost:5204/reports/resources/occupancy?branchId=44444444-4444-4444-4444-444444444444&date=2026-06-17" --header "Authorization: Bearer PEGAR_TENANT_ADMIN_TOKEN"
+```
+
+Con rango de fechas:
+
+```
+curl --request GET --url "http://localhost:5204/reports/resources/occupancy?branchId=44444444-4444-4444-4444-444444444444&dateFrom=2026-06-01&dateTo=2026-06-17" --header "Authorization: Bearer PEGAR_TENANT_ADMIN_TOKEN"
+```
+
+---
+
+### 48. Servicios más reservados `[Reporting]`
+> Ranking por `totalCreated` descendente. Acepta `month=yyyy-MM` (mes único) o `monthFrom`/`monthTo` (máx 24 meses). Agrega totales de múltiples meses en memoria antes de rankear.
+
+```
+curl --request GET --url "http://localhost:5204/reports/services/top?month=2026-06" --header "Authorization: Bearer PEGAR_TENANT_ADMIN_TOKEN"
+```
+
+Con rango mensual:
+
+```
+curl --request GET --url "http://localhost:5204/reports/services/top?monthFrom=2026-01&monthTo=2026-06" --header "Authorization: Bearer PEGAR_TENANT_ADMIN_TOKEN"
+```
+
+---
+
+### 49. Horas pico `[Reporting]`
+> `branchId` requerido. Acepta `date` (día único) o `dateFrom`/`dateTo` (máx 31 días). Devuelve solo las horas con actividad, ordenadas por `hourOfDay` ascendente. Si se consulta un rango, los conteos se acumulan por hora del día.
+
+```
+curl --request GET --url "http://localhost:5204/reports/peak-hours?branchId=44444444-4444-4444-4444-444444444444&date=2026-06-17" --header "Authorization: Bearer PEGAR_TENANT_ADMIN_TOKEN"
+```
+
+Con rango de fechas:
+
+```
+curl --request GET --url "http://localhost:5204/reports/peak-hours?branchId=44444444-4444-4444-4444-444444444444&dateFrom=2026-06-01&dateTo=2026-06-17" --header "Authorization: Bearer PEGAR_TENANT_ADMIN_TOKEN"
+```
