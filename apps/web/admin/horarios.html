@@ -46,7 +46,9 @@
 import { catalog } from '../js/api.js';
 import { requireAdmin, getBranchId } from '../js/auth.js';
 import { renderSidebar, toast, confirmModal, formModal, loadingHtml, emptyHtml, errorHtml } from '../js/components.js';
-import { DAYS_ES, friendlyError, escHtml } from '../js/utils.js';
+import { friendlyError, escHtml } from '../js/utils.js';
+
+const ISO_DAYS = { 1:'Lunes', 2:'Martes', 3:'Miércoles', 4:'Jueves', 5:'Viernes', 6:'Sábado', 7:'Domingo' };
 
 requireAdmin();
 document.getElementById('sidebar-slot').appendChild(renderSidebar('horarios.html'));
@@ -57,17 +59,21 @@ const content     = document.getElementById('content');
 const section     = document.getElementById('schedules-section');
 let resources = [];
 
-// Load branches
+// Load branches then auto-select first
 try {
   const res = await catalog.getBranches();
   const list = Array.isArray(res) ? res : (res?.items ?? []);
   list.forEach(b => {
     const o = document.createElement('option');
-    o.value = b.id; o.textContent = b.name;
+    o.value = b.branchId; o.textContent = b.name;
     selBranch.appendChild(o);
   });
   const myBranch = getBranchId();
-  if (myBranch) selBranch.value = myBranch;
+  if (myBranch && list.find(b => b.branchId === myBranch)) {
+    selBranch.value = myBranch;
+  } else if (list.length) {
+    selBranch.value = list[0].branchId;
+  }
   if (selBranch.value) loadResources();
 } catch {}
 
@@ -81,7 +87,7 @@ async function loadResources() {
     const res = await catalog.getResources({ branchId: selBranch.value });
     resources = Array.isArray(res) ? res : (res?.items ?? []);
     selResource.innerHTML = '<option value="">Seleccionar recurso...</option>' +
-      resources.map(r => `<option value="${r.id}">${escHtml(r.name)}</option>`).join('');
+      resources.map(r => `<option value="${r.resourceId}">${escHtml(r.name)}</option>`).join('');
   } catch (err) {
     selResource.innerHTML = '<option value="">Error cargando recursos</option>';
   }
@@ -94,7 +100,7 @@ document.getElementById('load-btn').addEventListener('click', () => {
 
 async function loadSchedules() {
   section.style.display = 'block';
-  const r = resources.find(x => x.id === selResource.value);
+  const r = resources.find(x => x.resourceId === selResource.value);
   document.getElementById('resource-title').textContent = `Horarios de: ${r?.name ?? selResource.value}`;
   content.innerHTML = loadingHtml();
 
@@ -110,11 +116,11 @@ async function loadSchedules() {
         <tbody>
           ${sorted.map(s => `
             <tr>
-              <td>${DAYS_ES[s.dayOfWeek ?? 0]}</td>
+              <td>${ISO_DAYS[s.dayOfWeek] ?? '—'}</td>
               <td>${s.startTime}</td>
               <td>${s.endTime}</td>
               <td class="actions-col">
-                <button class="btn btn-danger btn-sm" data-del="${s.id}">Eliminar</button>
+                <button class="btn btn-danger btn-sm" data-del="${s.id ?? s.scheduleId}">Eliminar</button>
               </td>
             </tr>`).join('')}
         </tbody>
@@ -136,7 +142,11 @@ async function loadSchedules() {
 }
 
 document.getElementById('new-schedule-btn').addEventListener('click', async () => {
-  const dayOptions = DAYS_ES.map((d, i) => `<option value="${i}">${d}</option>`).join('');
+  // ISO day numbers: Mon=1 … Sun=7
+  const isoDays = [
+    [1,'Lunes'],[2,'Martes'],[3,'Miércoles'],[4,'Jueves'],[5,'Viernes'],[6,'Sábado'],[7,'Domingo']
+  ];
+  const dayOptions = isoDays.map(([v,l]) => `<option value="${v}">${l}</option>`).join('');
   const data = await formModal('Agregar horario', `
     <div class="form-group"><label>Día de la semana</label>
       <select name="dayOfWeek" class="form-control">${dayOptions}</select>
@@ -150,6 +160,7 @@ document.getElementById('new-schedule-btn').addEventListener('click', async () =
   try {
     await catalog.createSchedule({
       resourceId: selResource.value,
+      branchId:   selBranch.value,
       dayOfWeek:  +data.dayOfWeek,
       startTime:  data.startTime,
       endTime:    data.endTime,

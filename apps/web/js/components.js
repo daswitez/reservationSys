@@ -82,21 +82,25 @@ export function formModal(title, bodyHtml, submitLabel = 'Guardar') {
 
 /* ── Sidebar ─────────────────────────────────────────────────────────────── */
 const NAV_LINKS = [
-  { href: 'agenda.html',     label: '📅 Agenda' },
-  { href: 'sucursales.html', label: '🏢 Sucursales' },
-  { href: 'servicios.html',  label: '✂️ Servicios' },
-  { href: 'recursos.html',   label: '🪑 Recursos' },
-  { href: 'horarios.html',   label: '🕐 Horarios' },
-  { href: 'bloqueos.html',   label: '🚫 Bloqueos' },
-  { href: 'reportes.html',   label: '📊 Reportes' },
+  { href: 'agenda.html',     label: '📅 Agenda',      roles: null },
+  { href: 'reservas.html',   label: '🔍 Reservas',    roles: null },
+  { href: 'sucursales.html', label: '🏢 Sucursales',  roles: ['super_admin','tenant_admin','branch_admin'] },
+  { href: 'servicios.html',  label: '✂️ Servicios',   roles: ['super_admin','tenant_admin','branch_admin'] },
+  { href: 'recursos.html',   label: '🪑 Recursos',    roles: ['super_admin','tenant_admin','branch_admin'] },
+  { href: 'horarios.html',   label: '🕐 Horarios',    roles: ['super_admin','tenant_admin','branch_admin'] },
+  { href: 'bloqueos.html',   label: '🚫 Bloqueos',    roles: ['super_admin','tenant_admin','branch_admin','receptionist'] },
+  { href: 'usuarios.html',   label: '👥 Usuarios',    roles: ['super_admin','tenant_admin'] },
+  { href: 'reportes.html',   label: '📊 Reportes',    roles: ['super_admin','tenant_admin','branch_admin'] },
 ];
 
 export function renderSidebar(activePage) {
   const user  = getUser();
   const roles = getRoles();
-  const links = NAV_LINKS.map(l =>
-    `<a href="${l.href}" class="nav-link${activePage === l.href ? ' active' : ''}">${l.label}</a>`
-  ).join('');
+  const links = NAV_LINKS
+    .filter(l => !l.roles || l.roles.some(r => roles.includes(r)))
+    .map(l =>
+      `<a href="${l.href}" class="nav-link${activePage === l.href ? ' active' : ''}">${l.label}</a>`
+    ).join('');
 
   const el = document.createElement('aside');
   el.className = 'sidebar';

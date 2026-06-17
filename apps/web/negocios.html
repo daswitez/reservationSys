@@ -23,14 +23,14 @@
 
 <script type="module">
 import { identity } from './js/api.js';
-import { getToken, getRoles, clearSession, isAdmin } from './js/auth.js';
+import { getToken, getRoles, clearSession, isStaff } from './js/auth.js';
 import { escHtml } from './js/utils.js';
 
 // Nav
 const navLinks = document.getElementById('nav-links');
 const token = getToken();
 if (token) {
-  if (isAdmin()) {
+  if (isStaff()) {
     navLinks.innerHTML = `<a href="/admin/agenda.html" class="btn btn-secondary btn-sm">Panel admin</a> <button class="btn btn-ghost btn-sm" id="logout-btn">Salir</button>`;
   } else {
     navLinks.innerHTML = `<a href="mis-reservas.html" class="btn btn-secondary btn-sm">Mis reservas</a> <button class="btn btn-ghost btn-sm" id="logout-btn">Salir</button>`;
@@ -53,7 +53,7 @@ try {
       ${list.map(t => `
         <div class="card negocio-card" onclick="location.href='reservar.html?tenantSlug=${escHtml(t.slug ?? t.id)}&tenantName=${encodeURIComponent(t.name)}'">
           <div class="negocio-name">${escHtml(t.name)}</div>
-          <div class="negocio-rubro">${escHtml(t.industry ?? t.category ?? '')}</div>
+          <div class="negocio-rubro">${escHtml(t.mainCategory ?? '')}</div>
           <button class="btn btn-primary btn-sm">Reservar turno →</button>
         </div>`).join('')}
     </div>`;

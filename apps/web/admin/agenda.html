@@ -16,7 +16,6 @@
       <button class="btn btn-secondary btn-sm" id="block-btn">+ Nuevo bloqueo</button>
     </div>
 
-    <!-- Filters -->
     <div class="filter-bar">
       <div class="form-group">
         <label>Fecha</label>
@@ -25,7 +24,7 @@
       <div class="form-group">
         <label>Sucursal</label>
         <select id="filter-branch" class="form-control" style="min-width:180px">
-          <option value="">Todas</option>
+          <option value="">Seleccionar...</option>
         </select>
       </div>
       <div class="form-group">
@@ -37,13 +36,11 @@
       <button class="btn btn-primary" id="search-btn">Buscar</button>
     </div>
 
-    <!-- Reservas -->
     <div class="card" style="margin-bottom:1.5rem">
       <div class="card-header"><h3>Reservas</h3></div>
       <div id="reservas-content" class="table-wrap"></div>
     </div>
 
-    <!-- Bloqueos -->
     <div class="card">
       <div class="card-header"><h3>Bloqueos activos</h3></div>
       <div id="bloqueos-content" class="table-wrap"></div>
@@ -53,11 +50,11 @@
 
 <script type="module">
 import { booking, catalog } from '../js/api.js';
-import { requireAdmin, getBranchId, getRoles } from '../js/auth.js';
+import { requireStaff, getBranchId } from '../js/auth.js';
 import { renderSidebar, toast, confirmModal, formModal, loadingHtml, emptyHtml, errorHtml } from '../js/components.js';
 import { badge, formatDateTime, formatTime, friendlyError, escHtml, today } from '../js/utils.js';
 
-requireAdmin();
+requireStaff();
 document.getElementById('sidebar-slot').appendChild(renderSidebar('agenda.html'));
 
 const filterDate     = document.getElementById('filter-date');
@@ -69,50 +66,74 @@ const bloqueosDiv    = document.getElementById('bloqueos-content');
 
 filterDate.value = today();
 
-// Load branches
-try {
-  const branches = await catalog.getBranches();
-  const list = Array.isArray(branches) ? branches : (branches?.items ?? []);
-  list.forEach(b => {
-    const o = document.createElement('option');
-    o.value = b.id; o.textContent = b.name;
-    filterBranch.appendChild(o);
-  });
-  const myBranch = getBranchId();
-  if (myBranch) filterBranch.value = myBranch;
-} catch {}
+let allResources = [];
+let resourceMap  = {};
+let serviceMap   = {};
 
-// Load resources on branch change
-filterBranch.addEventListener('change', async () => {
+async function loadResources() {
   filterResource.innerHTML = '<option value="">Todos</option>';
+  allResources = [];
+  resourceMap  = {};
   if (!filterBranch.value) return;
   try {
     const res = await catalog.getResources({ branchId: filterBranch.value });
-    const list = Array.isArray(res) ? res : (res?.items ?? []);
-    list.forEach(r => {
+    allResources = Array.isArray(res) ? res : (res?.items ?? []);
+    allResources.forEach(r => {
+      resourceMap[r.resourceId] = r.name;
       const o = document.createElement('option');
-      o.value = r.id; o.textContent = r.name;
+      o.value = r.resourceId; o.textContent = r.name;
       filterResource.appendChild(o);
     });
   } catch {}
-});
+  // Pre-load services for name display
+  try {
+    const sres = await catalog.getServices();
+    const slist = Array.isArray(sres) ? sres : (sres?.items ?? []);
+    slist.forEach(s => { serviceMap[s.serviceId] = s.name; });
+  } catch {}
+}
+
+// Load branches then auto-select
+try {
+  const res = await catalog.getBranches();
+  const list = Array.isArray(res) ? res : (res?.items ?? []);
+  list.forEach(b => {
+    const o = document.createElement('option');
+    o.value = b.branchId; o.textContent = b.name;
+    filterBranch.appendChild(o);
+  });
+  const myBranch = getBranchId();
+  if (myBranch && list.find(b => b.branchId === myBranch)) {
+    filterBranch.value = myBranch;
+  } else if (list.length) {
+    filterBranch.value = list[0].branchId;
+  }
+  if (filterBranch.value) await loadResources();
+} catch {}
+
+filterBranch.addEventListener('change', loadResources);
 
 async function loadAgenda() {
+  if (!filterBranch.value) {
+    reservasDiv.innerHTML = emptyHtml('Seleccioná una sucursal para ver la agenda.');
+    bloqueosDiv.innerHTML = '';
+    return;
+  }
+
   reservasDiv.innerHTML = loadingHtml();
   bloqueosDiv.innerHTML = loadingHtml();
 
   const params = {
     date:       filterDate.value,
-    branchId:   filterBranch.value   || undefined,
+    branchId:   filterBranch.value,
     resourceId: filterResource.value || undefined,
   };
 
   try {
-    const data = await booking.agenda(params);
-    const reservas = data?.reservations ?? data ?? [];
+    const data     = await booking.agenda(params);
+    const reservas = data?.reservations ?? [];
     const bloqueos = data?.blocks ?? [];
 
-    // Reservas table
     if (!reservas.length) {
       reservasDiv.innerHTML = emptyHtml('Sin reservas para este día');
     } else {
@@ -123,24 +144,23 @@ async function loadAgenda() {
           </tr></thead>
           <tbody>
             ${reservas.map(r => `
-              <tr id="row-${r.id}">
+              <tr id="row-${r.reservationId}">
                 <td>${formatTime(r.startAt)} – ${formatTime(r.endAt)}</td>
                 <td>${escHtml(r.clientName ?? r.clientEmail ?? '—')}</td>
-                <td>${escHtml(r.serviceName ?? '—')}</td>
-                <td>${escHtml(r.resourceName ?? '—')}</td>
-                <td>${badge(r.status)}</td>
+                <td>${escHtml(r.serviceName ?? serviceMap[r.serviceId] ?? r.serviceId?.slice(0,8) + '…')}</td>
+                <td>${escHtml(r.resourceName ?? resourceMap[r.resourceId] ?? r.resourceId?.slice(0,8) + '…')}</td>
+                <td>${badge(r.status?.toLowerCase())}</td>
                 <td class="actions-col">
-                  ${r.status === 'confirmed' ? `
-                    <button class="btn btn-success btn-sm" data-attend="${r.id}">Atendida</button>
-                    <button class="btn btn-warning btn-sm" data-noshow="${r.id}">No-show</button>
-                    <button class="btn btn-danger btn-sm"  data-cancel="${r.id}">Cancelar</button>
+                  ${r.status === 'CONFIRMED' ? `
+                    <button class="btn btn-success btn-sm" data-attend="${r.reservationId}">Atendida</button>
+                    <button class="btn btn-warning btn-sm" data-noshow="${r.reservationId}">No-show</button>
+                    <button class="btn btn-danger btn-sm"  data-cancel="${r.reservationId}">Cancelar</button>
                   ` : '—'}
                 </td>
               </tr>`).join('')}
           </tbody>
         </table>`;
 
-      // Actions
       reservasDiv.querySelectorAll('[data-attend]').forEach(btn => {
         btn.addEventListener('click', async () => {
           if (!await confirmModal('¿Marcar como atendida?', 'Confirmar', false)) return;
@@ -175,7 +195,6 @@ async function loadAgenda() {
       });
     }
 
-    // Bloqueos table
     if (!bloqueos.length) {
       bloqueosDiv.innerHTML = emptyHtml('Sin bloqueos activos');
     } else {
@@ -187,13 +206,13 @@ async function loadAgenda() {
           <tbody>
             ${bloqueos.map(b => `
               <tr>
-                <td>${escHtml(b.resourceName ?? '—')}</td>
+                <td>${escHtml(b.resourceName ?? b.resourceId?.slice(0,8) + '…')}</td>
                 <td>${formatTime(b.startAt)}</td>
                 <td>${formatTime(b.endAt)}</td>
                 <td>${escHtml(b.reason ?? '—')}</td>
-                <td>${badge(b.status ?? 'active')}</td>
+                <td>${badge((b.status ?? 'ACTIVE').toLowerCase())}</td>
                 <td class="actions-col">
-                  ${b.status !== 'cancelled' ? `<button class="btn btn-danger btn-sm" data-cancelblock="${b.id}">Cancelar</button>` : '—'}
+                  ${b.status !== 'CANCELLED' ? `<button class="btn btn-danger btn-sm" data-cancelblock="${b.blockId}">Cancelar</button>` : '—'}
                 </td>
               </tr>`).join('')}
           </tbody>
@@ -219,14 +238,13 @@ async function loadAgenda() {
 searchBtn.addEventListener('click', loadAgenda);
 filterDate.addEventListener('change', loadAgenda);
 
-// New block modal
 document.getElementById('block-btn').addEventListener('click', async () => {
   let resourceOptions = '<option value="">Seleccionar...</option>';
   try {
     const params = filterBranch.value ? { branchId: filterBranch.value } : {};
     const res = await catalog.getResources(params);
     const list = Array.isArray(res) ? res : (res?.items ?? []);
-    resourceOptions += list.map(r => `<option value="${r.id}">${escHtml(r.name)}</option>`).join('');
+    resourceOptions += list.map(r => `<option value="${r.resourceId}">${escHtml(r.name)}</option>`).join('');
   } catch {}
 
   const data = await formModal('Crear bloqueo', `

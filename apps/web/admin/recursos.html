@@ -50,16 +50,18 @@ try {
   branches = Array.isArray(res) ? res : (res?.items ?? []);
   branches.forEach(b => {
     const o = document.createElement('option');
-    o.value = b.id; o.textContent = b.name;
+    o.value = b.branchId; o.textContent = b.name;
     filterBranch.appendChild(o);
   });
   const myBranch = getBranchId();
-  if (myBranch) filterBranch.value = myBranch;
+  if (myBranch && branches.find(b => b.branchId === myBranch)) {
+    filterBranch.value = myBranch;
+  }
 } catch {}
 
 function resourceForm(r = {}) {
   const branchOptions = branches.map(b =>
-    `<option value="${b.id}" ${r.branchId === b.id ? 'selected' : ''}>${escHtml(b.name)}</option>`
+    `<option value="${b.branchId}" ${r.branchId === b.branchId ? 'selected' : ''}>${escHtml(b.name)}</option>`
   ).join('');
   return `
     <div class="form-group"><label>Sucursal</label>
@@ -94,24 +96,24 @@ async function load() {
           ${list.map(r => `
             <tr>
               <td><strong>${escHtml(r.name)}</strong></td>
-              <td>${escHtml(branches.find(b => b.id === r.branchId)?.name ?? r.branchName ?? '—')}</td>
+              <td>${escHtml(branches.find(b => b.branchId === r.branchId)?.name ?? r.branchName ?? '—')}</td>
               <td>${escHtml(r.description ?? '—')}</td>
               <td>${badge(r.status ?? 'active')}</td>
               <td class="actions-col">
-                <button class="btn btn-secondary btn-sm" data-edit="${r.id}">Editar</button>
-                <button class="btn btn-danger btn-sm"    data-del="${r.id}">Eliminar</button>
+                <button class="btn btn-secondary btn-sm" data-edit="${r.resourceId}">Editar</button>
+                <button class="btn btn-danger btn-sm"    data-del="${r.resourceId}">Eliminar</button>
               </td>
             </tr>`).join('')}
         </tbody>
       </table>`;
 
     content.querySelectorAll('[data-edit]').forEach(btn => {
-      const resource = list.find(r => r.id === btn.dataset.edit);
+      const resource = list.find(r => r.resourceId === btn.dataset.edit);
       btn.addEventListener('click', async () => {
         const data = await formModal('Editar recurso', resourceForm(resource), 'Guardar cambios');
         if (!data || !data.name) return;
         try {
-          await catalog.updateResource(resource.id, data);
+          await catalog.updateResource(resource.resourceId, data);
           toast('Recurso actualizado.', 'success');
           load();
         } catch (err) { toast(friendlyError(err), 'error'); }

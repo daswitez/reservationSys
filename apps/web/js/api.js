@@ -47,6 +47,15 @@ export const identity = {
   login:    (email, password) => apiFetch(`${API.identity}/auth/login`,    { method: 'POST', body: JSON.stringify({ email, password }) }),
   register: (data)            => apiFetch(`${API.identity}/auth/register`,  { method: 'POST', body: JSON.stringify(data) }),
   tenants:  ()                => apiFetch(`${API.identity}/tenants/public`),
+
+  // Users
+  getUsers:         (p)       => apiFetch(`${API.identity}/users?${qs(p)}`),
+  updateUser:       (id, d)   => apiFetch(`${API.identity}/users/${id}`,        { method: 'PUT',   body: JSON.stringify(d) }),
+  updateUserStatus: (id, s)   => apiFetch(`${API.identity}/users/${id}/status`, { method: 'PATCH', body: JSON.stringify({ status: s }) }),
+  deleteUser:       (id)      => apiFetch(`${API.identity}/users/${id}`,        { method: 'DELETE' }),
+  createAdmin:      (d)       => apiFetch(`${API.identity}/users/admin`,        { method: 'POST',  body: JSON.stringify(d) }),
+  updateMe:         (d)       => apiFetch(`${API.identity}/users/me`,           { method: 'PUT',   body: JSON.stringify(d) }),
+  changePassword:   (d)       => apiFetch(`${API.identity}/users/me/password`,  { method: 'PATCH', body: JSON.stringify(d) }),
 };
 
 /* ── Catalog ────────────────────────────────────────────────────────────── */
@@ -70,9 +79,9 @@ export const catalog = {
   deleteResource:(id)     => apiFetch(`${API.catalog}/resources/${id}`,  { method: 'DELETE' }),
 
   // Admin schedules
-  getSchedules:  (resourceId)  => apiFetch(`${API.catalog}/schedules?resourceId=${resourceId}`),
-  createSchedule:(d)           => apiFetch(`${API.catalog}/schedules`,       { method: 'POST',   body: JSON.stringify(d) }),
-  deleteSchedule:(id)          => apiFetch(`${API.catalog}/schedules/${id}`, { method: 'DELETE' }),
+  getSchedules:  (resourceId)  => apiFetch(`${API.catalog}/resource-schedules?resourceId=${resourceId}`),
+  createSchedule:(d)           => apiFetch(`${API.catalog}/resource-schedules`,       { method: 'POST',   body: JSON.stringify(d) }),
+  deleteSchedule:(id)          => apiFetch(`${API.catalog}/resource-schedules/${id}`, { method: 'DELETE' }),
 
   // Public
   publicBranches: (slug)           => apiFetch(`${API.catalog}/public/tenants/${slug}/branches`),

@@ -28,6 +28,11 @@ export function isAdmin() {
   return hasRole('super_admin', 'tenant_admin', 'branch_admin');
 }
 
+// Staff = admin roles + receptionist + professional (can access operational admin pages)
+export function isStaff() {
+  return hasRole('super_admin', 'tenant_admin', 'branch_admin', 'receptionist', 'professional');
+}
+
 export function requireAuth() {
   if (!getToken()) { location.href = '/index.html'; return false; }
   return true;
@@ -36,6 +41,12 @@ export function requireAuth() {
 export function requireAdmin() {
   if (!getToken()) { location.href = '/index.html'; return false; }
   if (!isAdmin())  { location.href = '/index.html'; return false; }
+  return true;
+}
+
+export function requireStaff() {
+  if (!getToken()) { location.href = '/index.html'; return false; }
+  if (!isStaff())  { location.href = '/index.html'; return false; }
   return true;
 }
 
@@ -50,7 +61,7 @@ export function getSavedIds() {
 }
 
 export function redirectByRole() {
-  if (hasRole('super_admin', 'tenant_admin', 'branch_admin')) {
+  if (isStaff()) {
     location.href = '/admin/agenda.html';
   } else {
     location.href = '/negocios.html';

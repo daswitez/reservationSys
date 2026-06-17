@@ -92,7 +92,7 @@ builder.Services.AddAuthorizationBuilder()
         .RequireAuthenticatedUser()
         .RequireClaim("user_id")
         .RequireClaim("tenant_id")
-        .RequireRole("tenant_admin"));
+        .RequireRole("tenant_admin", "branch_admin", "receptionist", "professional"));
 
 builder.Services.AddCors(options =>
     options.AddDefaultPolicy(p =>

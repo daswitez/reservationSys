@@ -79,7 +79,7 @@ async function loadBranches() {
     setContent(`<h3 style="margin-bottom:1rem">Elegí una sucursal</h3>
       <div style="display:flex;flex-direction:column;gap:.5rem">
         ${list.map(b => `
-          <button class="slot-btn" style="text-align:left;padding:.875rem 1rem" data-id="${b.id}" data-name="${escHtml(b.name)}">
+          <button class="slot-btn" style="text-align:left;padding:.875rem 1rem" data-id="${b.branchId}" data-name="${escHtml(b.name)}">
             <strong>${escHtml(b.name)}</strong>
             ${b.address ? `<br><small class="text-muted">${escHtml(b.address)}</small>` : ''}
           </button>`).join('')}
@@ -108,9 +108,9 @@ async function loadServices() {
     setContent(`<h3 style="margin-bottom:1rem">Elegí un servicio</h3>
       <div style="display:flex;flex-direction:column;gap:.5rem">
         ${list.map(s => `
-          <button class="slot-btn" style="text-align:left;padding:.875rem 1rem" data-id="${s.id}" data-name="${escHtml(s.name)}" data-duration="${s.durationMinutes ?? 30}">
+          <button class="slot-btn" style="text-align:left;padding:.875rem 1rem" data-id="${s.serviceId}" data-name="${escHtml(s.name)}" data-duration="${s.durationMinutes ?? 30}">
             <strong>${escHtml(s.name)}</strong>
-            <br><small class="text-muted">Duración: ${s.durationMinutes ?? 30} min${s.price ? ` · $${s.price}` : ''}</small>
+            <br><small class="text-muted">Duración: ${s.durationMinutes ?? 30} min${s.referencePrice ? ` · $${s.referencePrice}` : ''}</small>
           </button>`).join('')}
       </div>
       <div style="margin-top:1rem"><button class="btn btn-ghost btn-sm" id="back-btn">← Volver</button></div>`);
@@ -155,11 +155,12 @@ async function loadSlots() {
   setContent(`<div class="loading-center"><div class="spinner"></div></div>`);
   try {
     const slots = await booking.availability({
-      branchId:  state.branch.id,
-      serviceId: state.service.id,
-      date:      state.date,
+      tenantSlug: tenantSlug,
+      branchId:   state.branch.id,
+      serviceId:  state.service.id,
+      date:       state.date,
     });
-    const list = Array.isArray(slots) ? slots : (slots?.slots ?? []);
+    const list = Array.isArray(slots) ? slots : (slots?.availableSlots ?? slots?.slots ?? []);
     if (!list.length) {
       setContent(`<div class="state-box"><div class="state-icon">🕐</div><h4>Sin horarios disponibles</h4><p>Probá con otra fecha.</p></div>
         <button class="btn btn-ghost btn-sm" id="back-btn">← Cambiar fecha</button>`);

@@ -19,7 +19,9 @@ public sealed class BookingAuthorizationService
 
         if (user.IsInRole("super_admin") ||
             user.IsInRole("tenant_admin") ||
-            user.IsInRole("branch_admin"))
+            user.IsInRole("branch_admin") ||
+            user.IsInRole("receptionist") ||
+            user.IsInRole("professional"))
         {
             return true;
         }
@@ -123,7 +125,8 @@ public sealed class BookingAuthorizationService
             }
         }
 
-        if (user.IsInRole("tenant_admin") || user.IsInRole("branch_admin"))
+        if (user.IsInRole("tenant_admin") || user.IsInRole("branch_admin") ||
+            user.IsInRole("receptionist") || user.IsInRole("professional"))
         {
             return true;
         }
@@ -155,7 +158,9 @@ public sealed class BookingAuthorizationService
             return false;
         }
 
-        if (tenantId == claimTenantId && (user.IsInRole("tenant_admin") || user.IsInRole("branch_admin")))
+        if (tenantId == claimTenantId &&
+            (user.IsInRole("tenant_admin") || user.IsInRole("branch_admin") ||
+             user.IsInRole("receptionist") || user.IsInRole("professional")))
         {
             return true;
         }

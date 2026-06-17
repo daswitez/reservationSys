@@ -40,7 +40,7 @@ try {
 
 function serviceForm(s = {}) {
   const branchOptions = branches.map(b =>
-    `<option value="${b.id}" ${(s.branchId ?? s.branch_id) === b.id ? 'selected' : ''}>${escHtml(b.name)}</option>`
+    `<option value="${b.branchId}" ${s.branchId === b.branchId ? 'selected' : ''}>${escHtml(b.name)}</option>`
   ).join('');
   return `
     <div class="form-group"><label>Sucursal</label>
@@ -52,7 +52,7 @@ function serviceForm(s = {}) {
     <div class="form-group"><label>Descripción</label><textarea name="description" class="form-control">${escHtml(s.description ?? '')}</textarea></div>
     <div class="form-row">
       <div class="form-group"><label>Duración (minutos)</label><input name="durationMinutes" type="number" class="form-control" min="1" value="${s.durationMinutes ?? 30}" required></div>
-      <div class="form-group"><label>Precio (opcional)</label><input name="price" type="number" class="form-control" step="0.01" min="0" value="${s.price ?? ''}"></div>
+      <div class="form-group"><label>Precio (opcional)</label><input name="price" type="number" class="form-control" step="0.01" min="0" value="${s.referencePrice ?? ''}"></div>
     </div>
     <div class="form-group">
       <label>Estado</label>
@@ -72,32 +72,31 @@ async function load() {
 
     content.innerHTML = `
       <table>
-        <thead><tr><th>Nombre</th><th>Sucursal</th><th>Duración</th><th>Precio</th><th>Estado</th><th class="actions-col">Acciones</th></tr></thead>
+        <thead><tr><th>Nombre</th><th>Duración</th><th>Precio</th><th>Estado</th><th class="actions-col">Acciones</th></tr></thead>
         <tbody>
           ${list.map(s => `
             <tr>
               <td><strong>${escHtml(s.name)}</strong>${s.description ? `<br><small class="text-muted">${escHtml(s.description)}</small>` : ''}</td>
-              <td>${escHtml(s.branchName ?? branches.find(b => b.id === s.branchId)?.name ?? '—')}</td>
               <td>${s.durationMinutes ?? '—'} min</td>
-              <td>${s.price ? `$${s.price}` : '—'}</td>
+              <td>${s.referencePrice ? `$${s.referencePrice}` : '—'}</td>
               <td>${badge(s.status ?? 'active')}</td>
               <td class="actions-col">
-                <button class="btn btn-secondary btn-sm" data-edit="${s.id}">Editar</button>
-                <button class="btn btn-danger btn-sm"    data-del="${s.id}">Eliminar</button>
+                <button class="btn btn-secondary btn-sm" data-edit="${s.serviceId}">Editar</button>
+                <button class="btn btn-danger btn-sm"    data-del="${s.serviceId}">Eliminar</button>
               </td>
             </tr>`).join('')}
         </tbody>
       </table>`;
 
     content.querySelectorAll('[data-edit]').forEach(btn => {
-      const svc = list.find(s => s.id === btn.dataset.edit);
+      const svc = list.find(s => s.serviceId === btn.dataset.edit);
       btn.addEventListener('click', async () => {
         const data = await formModal('Editar servicio', serviceForm(svc), 'Guardar cambios');
         if (!data || !data.name) return;
         if (data.durationMinutes) data.durationMinutes = +data.durationMinutes;
         if (data.price) data.price = +data.price; else delete data.price;
         try {
-          await catalog.updateService(svc.id, data);
+          await catalog.updateService(svc.serviceId, data);
           toast('Servicio actualizado.', 'success');
           load();
         } catch (err) { toast(friendlyError(err), 'error'); }

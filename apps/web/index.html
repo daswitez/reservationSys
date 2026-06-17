@@ -62,7 +62,7 @@ form.addEventListener('submit', async e => {
       form.password.value
     );
     // res contains { token, user: { userId, email, roles, tenantId, branchId } }
-    setSession(res.token, res.user ?? res);
+    setSession(res.accessToken, res.user ?? res);
     redirectByRole();
   } catch (err) {
     errorBox.textContent = friendlyError(err);

@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Reservas — ReservasSys</title>
+  <link rel="stylesheet" href="../css/main.css">
+</head>
+<body>
+<div class="app-shell">
+  <div id="sidebar-slot"></div>
+
+  <main class="main-content">
+    <div class="page-header">
+      <h1>🔍 Buscar reservas</h1>
+    </div>
+
+    <div class="filter-bar">
+      <div class="form-group">
+        <label>Desde</label>
+        <input type="date" id="filter-from" class="form-control">
+      </div>
+      <div class="form-group">
+        <label>Hasta</label>
+        <input type="date" id="filter-to" class="form-control">
+      </div>
+      <div class="form-group">
+        <label>Sucursal</label>
+        <select id="filter-branch" class="form-control" style="min-width:180px">
+          <option value="">Todas</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Servicio</label>
+        <select id="filter-service" class="form-control" style="min-width:180px">
+          <option value="">Todos</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Estado</label>
+        <select id="filter-status" class="form-control">
+          <option value="">Todos</option>
+          <option value="CONFIRMED">Confirmada</option>
+          <option value="ATTENDED">Atendida</option>
+          <option value="CANCELLED">Cancelada</option>
+          <option value="NO_SHOW">No presentó</option>
+        </select>
+      </div>
+      <button class="btn btn-primary" id="search-btn">Buscar</button>
+    </div>
+
+    <div class="card">
+      <div id="content" class="table-wrap"></div>
+    </div>
+  </main>
+</div>
+
+<script type="module">
+import { booking, catalog } from '../js/api.js';
+import { requireStaff, getBranchId } from '../js/auth.js';
+import { renderSidebar, toast, confirmModal, loadingHtml, emptyHtml, errorHtml } from '../js/components.js';
+import { badge, formatDateTime, friendlyError, escHtml, today } from '../js/utils.js';
+
+requireStaff();
+document.getElementById('sidebar-slot').appendChild(renderSidebar('reservas.html'));
+
+const filterFrom    = document.getElementById('filter-from');
+const filterTo      = document.getElementById('filter-to');
+const filterBranch  = document.getElementById('filter-branch');
+const filterService = document.getElementById('filter-service');
+const filterStatus  = document.getElementById('filter-status');
+const content       = document.getElementById('content');
+
+filterFrom.value = today();
+
+// Preload catalog data for name mapping
+let branchMap  = {};
+let serviceMap = {};
+
+try {
+  const [branchRes, serviceRes] = await Promise.all([
+    catalog.getBranches(),
+    catalog.getServices(),
+  ]);
+
+  const branches = Array.isArray(branchRes) ? branchRes : (branchRes?.items ?? []);
+  branches.forEach(b => {
+    branchMap[b.branchId] = b.name;
+    const o = document.createElement('option');
+    o.value = b.branchId; o.textContent = b.name;
+    filterBranch.appendChild(o);
+  });
+  const myBranch = getBranchId();
+  if (myBranch && branches.find(b => b.branchId === myBranch)) filterBranch.value = myBranch;
+
+  const services = Array.isArray(serviceRes) ? serviceRes : (serviceRes?.items ?? []);
+  services.forEach(s => {
+    serviceMap[s.serviceId] = s.name;
+    const o = document.createElement('option');
+    o.value = s.serviceId; o.textContent = s.name;
+    filterService.appendChild(o);
+  });
+} catch {}
+
+async function load() {
+  content.innerHTML = loadingHtml();
+  const params = {
+    dateFrom:  filterFrom.value    || undefined,
+    dateTo:    filterTo.value      || undefined,
+    branchId:  filterBranch.value  || undefined,
+    serviceId: filterService.value || undefined,
+    status:    filterStatus.value  || undefined,
+  };
+
+  try {
+    const res  = await booking.adminReservations(params);
+    const list = Array.isArray(res) ? res : (res?.items ?? []);
+
+    if (!list.length) {
+      content.innerHTML = emptyHtml('Sin reservas para los filtros indicados');
+      return;
+    }
+
+    // Build history lookup by reservationId
+    const historyMap = {};
+    list.forEach(r => { historyMap[r.reservationId] = r.history ?? []; });
+
+    content.innerHTML = `
+      <table>
+        <thead><tr>
+          <th>Fecha y hora</th>
+          <th>Sucursal</th>
+          <th>Servicio</th>
+          <th>Estado</th>
+          <th>Notas</th>
+          <th class="actions-col">Acciones</th>
+        </tr></thead>
+        <tbody>
+          ${list.map(r => {
+            const branchName  = branchMap[r.branchId]   ?? r.branchId?.slice(0, 8)  + '…';
+            const serviceName = serviceMap[r.serviceId] ?? r.serviceId?.slice(0, 8) + '…';
+            const notesSnip   = r.notes ? (r.notes.length > 35 ? r.notes.slice(0, 35) + '…' : r.notes) : '';
+            return `
+              <tr>
+                <td>${formatDateTime(r.startAt)}</td>
+                <td>${escHtml(branchName)}</td>
+                <td>${escHtml(serviceName)}</td>
+                <td>${badge(r.status?.toLowerCase())}</td>
+                <td>${notesSnip ? `<span title="${escHtml(r.notes)}">${escHtml(notesSnip)}</span>` : '—'}</td>
+                <td class="actions-col">
+                  <button class="btn btn-ghost btn-sm" data-history="${r.reservationId}">Historial</button>
+                  ${r.status === 'CONFIRMED' ? `
+                    <button class="btn btn-success btn-sm" data-attend="${r.reservationId}">Atendida</button>
+                    <button class="btn btn-warning btn-sm" data-noshow="${r.reservationId}">No-show</button>
+                    <button class="btn btn-danger btn-sm"  data-cancel="${r.reservationId}">Cancelar</button>
+                  ` : ''}
+                </td>
+              </tr>`;
+          }).join('')}
+        </tbody>
+      </table>
+      <p class="text-sm text-muted" style="padding:.5rem 1rem">
+        ${list.length} resultado${list.length !== 1 ? 's' : ''}${list.length === 200 ? ' (límite alcanzado, refiná los filtros)' : ''}.
+      </p>`;
+
+    // Historial modal
+    content.querySelectorAll('[data-history]').forEach(btn => {
+      btn.addEventListener('click', () => openHistoryModal(
+        btn.dataset.history,
+        historyMap[btn.dataset.history] ?? []
+      ));
+    });
+
+    // Attend
+    content.querySelectorAll('[data-attend]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        if (!await confirmModal('¿Marcar como atendida?', 'Confirmar', false)) return;
+        try { await booking.attend(btn.dataset.attend); toast('Marcada como atendida.', 'success'); load(); }
+        catch (err) { toast(friendlyError(err), 'error'); }
+      });
+    });
+
+    // No-show
+    content.querySelectorAll('[data-noshow]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        if (!await confirmModal('¿Marcar como no presentado?', 'Confirmar')) return;
+        try { await booking.noShow(btn.dataset.noshow); toast('Marcado como no-show.', 'success'); load(); }
+        catch (err) { toast(friendlyError(err), 'error'); }
+      });
+    });
+
+    // Cancel
+    content.querySelectorAll('[data-cancel]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        if (!await confirmModal('¿Cancelar esta reserva?', 'Cancelar')) return;
+        try {
+          await booking.cancel(btn.dataset.cancel, 'Cancelado por administrador');
+          toast('Reserva cancelada.', 'success');
+          load();
+        }
+        catch (err) { toast(friendlyError(err), 'error'); }
+      });
+    });
+
+  } catch (err) {
+    content.innerHTML = errorHtml(friendlyError(err));
+  }
+}
+
+const ACTION_LABELS = {
+  CREATED: 'Creada', CANCELLED: 'Cancelada', ATTENDED: 'Atendida', NO_SHOW: 'No-show'
+};
+
+function openHistoryModal(reservationId, history) {
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+
+  const rows = !history.length
+    ? `<tr><td colspan="4" style="text-align:center;color:var(--gray-400)">Sin historial registrado</td></tr>`
+    : history.map(h => `
+        <tr>
+          <td>${formatDateTime(h.createdAt)}</td>
+          <td>${escHtml(ACTION_LABELS[h.action] ?? h.action)}</td>
+          <td style="white-space:nowrap">
+            ${h.previousStatus ? badge(h.previousStatus.toLowerCase()) : '—'}
+            → ${badge((h.newStatus ?? '').toLowerCase())}
+          </td>
+          <td>${escHtml(h.reason ?? '—')}</td>
+        </tr>`).join('');
+
+  overlay.innerHTML = `
+    <div class="modal" style="max-width:640px">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem">
+        <h3>Historial de reserva</h3>
+        <button class="modal-close-btn" id="_mclose">&times;</button>
+      </div>
+      <p class="text-sm text-muted" style="margin-bottom:1rem">
+        ID: <code>${reservationId}</code>
+      </p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Fecha</th><th>Acción</th><th>Estado</th><th>Motivo</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+      <div class="modal-actions">
+        <button class="btn btn-secondary" id="_mclose2">Cerrar</button>
+      </div>
+    </div>`;
+
+  document.body.appendChild(overlay);
+  const close = () => overlay.remove();
+  overlay.querySelector('#_mclose').onclick  = close;
+  overlay.querySelector('#_mclose2').onclick = close;
+  overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
+}
+
+document.getElementById('search-btn').addEventListener('click', load);
+filterFrom.addEventListener('change', load);
+
+load();
+</script>
+</body>
+</html>

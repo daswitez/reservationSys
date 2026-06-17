@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Usuarios — ReservasSys</title>
+  <link rel="stylesheet" href="../css/main.css">
+</head>
+<body>
+<div class="app-shell">
+  <div id="sidebar-slot"></div>
+
+  <main class="main-content">
+    <div class="page-header">
+      <h1>👥 Usuarios</h1>
+      <button class="btn btn-primary" id="new-btn" style="display:none">+ Crear tenant admin</button>
+    </div>
+
+    <div class="filter-bar">
+      <div class="form-group">
+        <label>Buscar</label>
+        <input type="text" id="filter-search" class="form-control" placeholder="Nombre o email…" style="min-width:220px">
+      </div>
+      <div class="form-group">
+        <label>Rol</label>
+        <select id="filter-role" class="form-control">
+          <option value="">Todos</option>
+          <option value="super_admin">Super admin</option>
+          <option value="tenant_admin">Tenant admin</option>
+          <option value="branch_admin">Branch admin</option>
+          <option value="receptionist">Recepcionista</option>
+          <option value="professional">Profesional</option>
+          <option value="client">Cliente</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Estado</label>
+        <select id="filter-status" class="form-control">
+          <option value="">Todos</option>
+          <option value="active">Activo</option>
+          <option value="inactive">Inactivo</option>
+          <option value="blocked">Bloqueado</option>
+        </select>
+      </div>
+      <button class="btn btn-primary" id="search-btn">Buscar</button>
+    </div>
+
+    <div class="card">
+      <div id="content" class="table-wrap"></div>
+    </div>
+  </main>
+</div>
+
+<script type="module">
+import { identity } from '../js/api.js';
+import { requireAdmin, hasRole, getUser } from '../js/auth.js';
+import { renderSidebar, toast, confirmModal, formModal, loadingHtml, emptyHtml, errorHtml } from '../js/components.js';
+import { badge, formatDateTime, friendlyError, escHtml } from '../js/utils.js';
+
+requireAdmin();
+document.getElementById('sidebar-slot').appendChild(renderSidebar('usuarios.html'));
+
+const isSuperAdmin  = hasRole('super_admin');
+const currentUser   = getUser();
+
+const filterSearch = document.getElementById('filter-search');
+const filterRole   = document.getElementById('filter-role');
+const filterStatus = document.getElementById('filter-status');
+const content      = document.getElementById('content');
+const newBtn       = document.getElementById('new-btn');
+
+// Only super_admin can create tenant admins via this UI
+if (isSuperAdmin) newBtn.style.display = '';
+
+// Cache tenants for create-admin form (super_admin only)
+let tenantsList = [];
+if (isSuperAdmin) {
+  try {
+    const res = await identity.tenants();
+    tenantsList = Array.isArray(res) ? res : (res?.items ?? []);
+  } catch {}
+}
+
+const ROLE_LABELS = {
+  super_admin:  'Super Admin',
+  tenant_admin: 'Tenant Admin',
+  branch_admin: 'Branch Admin',
+  receptionist: 'Recepcionista',
+  professional: 'Profesional',
+  client:       'Cliente',
+};
+
+async function load() {
+  content.innerHTML = loadingHtml();
+  const params = {
+    search: filterSearch.value.trim() || undefined,
+    role:   filterRole.value          || undefined,
+    status: filterStatus.value        || undefined,
+    limit:  200,
+  };
+
+  try {
+    const res   = await identity.getUsers(params);
+    const list  = res?.items ?? (Array.isArray(res) ? res : []);
+    const total = res?.total ?? list.length;
+
+    if (!list.length) { content.innerHTML = emptyHtml('Sin usuarios para los filtros indicados'); return; }
+
+    content.innerHTML = `
+      <table>
+        <thead><tr>
+          <th>Nombre</th>
+          <th>Email</th>
+          <th>Roles</th>
+          <th>Estado</th>
+          <th>Último acceso</th>
+          <th class="actions-col">Acciones</th>
+        </tr></thead>
+        <tbody>
+          ${list.map(u => {
+            const fullName = [u.firstName, u.lastName].filter(Boolean).join(' ');
+            const rolesBadges = (u.roles ?? []).map(r =>
+              `<span class="badge badge-blue" style="margin-right:.25rem">${escHtml(ROLE_LABELS[r] ?? r)}</span>`
+            ).join('');
+            const isSelf = u.userId === currentUser?.userId;
+            return `
+              <tr>
+                <td><strong>${escHtml(fullName)}</strong>${u.phone ? `<br><small class="text-muted">${escHtml(u.phone)}</small>` : ''}</td>
+                <td>${escHtml(u.email)}</td>
+                <td>${rolesBadges || '—'}</td>
+                <td>${badge(u.status)}</td>
+                <td class="text-sm text-muted">${u.lastLoginAt ? formatDateTime(u.lastLoginAt) : '—'}</td>
+                <td class="actions-col">
+                  ${isSelf
+                    ? '<span class="text-muted text-sm">(tú)</span>'
+                    : `<button class="btn btn-secondary btn-sm" data-edit="${u.userId}">Editar</button>
+                       <select class="form-control" style="display:inline-block;width:auto;padding:.25rem .5rem;font-size:.8rem" data-statussel="${u.userId}" data-current="${u.status}">
+                         <option value="active"   ${u.status === 'active'   ? 'selected' : ''}>Activo</option>
+                         <option value="inactive" ${u.status === 'inactive' ? 'selected' : ''}>Inactivo</option>
+                         <option value="blocked"  ${u.status === 'blocked'  ? 'selected' : ''}>Bloqueado</option>
+                       </select>
+                       <button class="btn btn-danger btn-sm" data-del="${u.userId}">Dar de baja</button>`
+                  }
+                </td>
+              </tr>`;
+          }).join('')}
+        </tbody>
+      </table>
+      <p class="text-sm text-muted" style="padding:.5rem 1rem">
+        ${list.length} de ${total} usuario${total !== 1 ? 's' : ''}.
+      </p>`;
+
+    // Edit user
+    content.querySelectorAll('[data-edit]').forEach(btn => {
+      const user = list.find(u => u.userId === btn.dataset.edit);
+      btn.addEventListener('click', async () => {
+        const data = await formModal('Editar usuario', `
+          <div class="form-row">
+            <div class="form-group"><label>Nombre</label>
+              <input name="firstName" class="form-control" value="${escHtml(user.firstName ?? '')}" required>
+            </div>
+            <div class="form-group"><label>Apellido</label>
+              <input name="lastName" class="form-control" value="${escHtml(user.lastName ?? '')}">
+            </div>
+          </div>
+          <div class="form-group"><label>Email</label>
+            <input name="email" type="email" class="form-control" value="${escHtml(user.email)}" required>
+          </div>
+          <div class="form-group"><label>Teléfono</label>
+            <input name="phone" class="form-control" value="${escHtml(user.phone ?? '')}">
+          </div>`, 'Guardar cambios');
+
+        if (!data || !data.firstName || !data.email) return;
+        try {
+          await identity.updateUser(user.userId, {
+            firstName: data.firstName.trim(),
+            lastName:  data.lastName?.trim()  || null,
+            email:     data.email.trim(),
+            phone:     data.phone?.trim()     || null,
+          });
+          toast('Usuario actualizado.', 'success');
+          load();
+        } catch (err) { toast(friendlyError(err), 'error'); }
+      });
+    });
+
+    // Status change via select
+    content.querySelectorAll('[data-statussel]').forEach(sel => {
+      sel.addEventListener('change', async () => {
+        const newStatus = sel.value;
+        const userId    = sel.dataset.statussel;
+        const prev      = sel.dataset.current;
+        if (newStatus === prev) return;
+
+        const labels = { active: 'activo', inactive: 'inactivo', blocked: 'bloqueado' };
+        if (!await confirmModal(`¿Cambiar estado a "${labels[newStatus]}"?`, 'Confirmar')) {
+          sel.value = prev;
+          return;
+        }
+        try {
+          await identity.updateUserStatus(userId, newStatus);
+          toast('Estado actualizado.', 'success');
+          load();
+        } catch (err) {
+          sel.value = prev;
+          toast(friendlyError(err), 'error');
+        }
+      });
+    });
+
+    // Deactivate user
+    content.querySelectorAll('[data-del]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        if (!await confirmModal('¿Dar de baja este usuario? El historial se conserva.', 'Dar de baja')) return;
+        try {
+          await identity.deleteUser(btn.dataset.del);
+          toast('Usuario dado de baja.', 'success');
+          load();
+        } catch (err) { toast(friendlyError(err), 'error'); }
+      });
+    });
+
+  } catch (err) {
+    content.innerHTML = errorHtml(friendlyError(err));
+  }
+}
+
+// Create tenant admin (super_admin only)
+// Note: el backend solo permite crear tenant_admin via este endpoint.
+// Para crear branch_admin/receptionist/professional, agregar desde base de datos.
+newBtn.addEventListener('click', async () => {
+  if (!tenantsList.length) {
+    toast('No hay tenants disponibles.', 'error');
+    return;
+  }
+  const tenantOptions = tenantsList.map(t =>
+    `<option value="${t.tenantId}">${escHtml(t.name)}</option>`
+  ).join('');
+
+  const data = await formModal('Crear Tenant Admin', `
+    <div class="alert alert-info" style="margin-bottom:1rem;font-size:.875rem">
+      Crea un usuario con rol <strong>Tenant Admin</strong> para gestionar un negocio.
+    </div>
+    <div class="form-group"><label>Tenant / Negocio</label>
+      <select name="tenantId" class="form-control" required>
+        <option value="">Seleccionar…</option>${tenantOptions}
+      </select>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label>Nombre</label>
+        <input name="firstName" class="form-control" required>
+      </div>
+      <div class="form-group"><label>Apellido</label>
+        <input name="lastName" class="form-control">
+      </div>
+    </div>
+    <div class="form-group"><label>Email</label>
+      <input name="email" type="email" class="form-control" required>
+    </div>
+    <div class="form-group"><label>Teléfono (opcional)</label>
+      <input name="phone" class="form-control" placeholder="+591...">
+    </div>
+    <div class="form-group"><label>Contraseña (mín. 8 caracteres)</label>
+      <input name="password" type="password" class="form-control" required minlength="8">
+    </div>`, 'Crear');
+
+  if (!data || !data.tenantId || !data.firstName || !data.email || !data.password) return;
+  if (data.password.length < 8) { toast('La contraseña debe tener al menos 8 caracteres.', 'error'); return; }
+
+  try {
+    await identity.createAdmin({
+      tenantId:  data.tenantId,
+      firstName: data.firstName.trim(),
+      lastName:  data.lastName?.trim()  || null,
+      email:     data.email.trim(),
+      phone:     data.phone?.trim()     || null,
+      password:  data.password,
+    });
+    toast('Tenant Admin creado correctamente.', 'success');
+    load();
+  } catch (err) { toast(friendlyError(err), 'error'); }
+});
+
+document.getElementById('search-btn').addEventListener('click', load);
+filterSearch.addEventListener('keydown', e => { if (e.key === 'Enter') load(); });
+
+load();
+</script>
+</body>
+</html>
